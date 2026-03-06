@@ -1,0 +1,4 @@
+pygame-ce>=2.5.7
+numpy
+# Optional: add torch if you want to use a neural-network agent later
+# torch (optional, required for DQN): install appropriate build for your platform
