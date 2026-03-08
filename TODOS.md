@@ -9,4 +9,4 @@
 - [ ] Dodac testy jednostkowe dla: kolizji, state encoding, mapowania akcji, load/save poziomow.
 - [ ] Dodac replay viewer (odtwarzanie epizodu z logu).
 - [ ] Dodac obsluge seedow i tryb deterministyczny dla replikowalnych eksperymentow.
-- [ ] Dodac profiler FPS/krokow i benchmark `dqn` vs `qlearning`.
+- [ ] Dodac profiler FPS/krokow i benchmark DQN.

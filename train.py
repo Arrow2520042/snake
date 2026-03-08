@@ -5,16 +5,12 @@ import datetime
 import json
 import numpy as np
 from game import SnakeGameAI, Point
-from rl_agent import QLearningAgent
-try:
-    from dqn_agent import DQNAgent
-except Exception:
-    DQNAgent = None
+from dqn_agent import DQNAgent
 
 DEFAULT_MAX_STEPS = 15000
 
 
-def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', device='auto', init_checkpoint=None):
+def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='model.pth', device='auto', init_checkpoint=None):
     env = SnakeGameAI(render=False)
     # If a level path was provided via env var, try to load it into env.walls
     lvl = os.environ.get('SNAKE_LEVEL_PATH')
@@ -22,7 +18,6 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
         try:
             with open(lvl, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            # data may be stored as cell coordinates [cx,cy]; convert to pixel coords using env metrics
             conv = set()
             for item in data:
                 try:
@@ -36,33 +31,23 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
             env.level_name = os.path.splitext(os.path.basename(lvl))[0]
         except Exception:
             env.level_name = 'default'
-    # choose agent based on save_path extension or availability
-    use_dqn = False
-    agent = None
-    # allow train to select based on save_path extension
-    if save_path.endswith('.pth'):
-        if DQNAgent is None:
-            raise RuntimeError('DQN requested but dqn_agent not available (install torch)')
-        # resolve device
-        if device == 'auto':
-            try:
-                import torch as _torch
-                dev = 'cuda' if _torch.cuda.is_available() else 'cpu'
-            except Exception:
-                dev = 'cpu'
-        else:
-            dev = device
-        agent = DQNAgent(device=dev)
-        use_dqn = True
-        # optionally initialize from checkpoint
-        if init_checkpoint:
-            try:
-                agent.load(init_checkpoint)
-                print('Loaded init checkpoint:', init_checkpoint)
-            except Exception as e:
-                print('Warning: failed to load init checkpoint:', e)
+
+    # resolve device
+    if device == 'auto':
+        try:
+            import torch as _torch
+            dev = 'cuda' if _torch.cuda.is_available() else 'cpu'
+        except Exception:
+            dev = 'cpu'
     else:
-        agent = QLearningAgent()
+        dev = device
+    agent = DQNAgent(device=dev)
+    if init_checkpoint:
+        try:
+            agent.load(init_checkpoint)
+            print('Loaded init checkpoint:', init_checkpoint)
+        except Exception as e:
+            print('Warning: failed to load init checkpoint:', e)
 
     # prepare logging directory per-level
     level_name = getattr(env, 'level_name', None) or 'default'
@@ -78,7 +63,7 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
             fi.write(f'timestamp: {timestamp}\n')
             fi.write(f'level: {level_name}\n')
             fi.write(f'save_path: {save_path}\n')
-            fi.write(f'device: {dev if save_path.endswith(".pth") else "cpu"}\n')
+            fi.write(f'device: {dev}\n')
             fi.write(f'episodes: {episodes}\n')
     except Exception:
         pass
@@ -106,7 +91,6 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
             infof.write(f'episodes: {episodes}\n')
             infof.write(f'max_steps: {max_steps}\n')
             infof.write(f'save_path: {save_path}\n')
-            infof.write(f'use_dqn: {use_dqn}\n')
             infof.write(f'device: {device}\n')
     except Exception:
         pass
@@ -126,13 +110,10 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
             next_state, reward, done, info = env.play_step(action)
             total_reward += reward
             ep_steps = t + 1
-            if use_dqn:
-                agent.push(state, action, reward, next_state, done)
-                agent.update()
-                if t % 100 == 0:
-                    agent.sync_target()
-            else:
-                agent.learn(state, action, reward, next_state, done)
+            agent.push(state, action, reward, next_state, done)
+            agent.update()
+            if t % 100 == 0:
+                agent.sync_target()
             state = next_state
             if done:
                 break
@@ -169,8 +150,7 @@ def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', d
         # periodic checkpoint
         if ep % 200 == 0:
             base = 'model'
-            ext = '.pth' if use_dqn or save_path.endswith('.pth') else '.npy'
-            ckpt_path = os.path.join(logs_dir, f'{base}_ep{ep}{ext}')
+            ckpt_path = os.path.join(logs_dir, f'{base}_ep{ep}.pth')
             try:
                 agent.save(ckpt_path)
                 print(
@@ -207,26 +187,16 @@ if __name__ == '__main__':
     parser.add_argument('--level', type=str, default='')
     parser.add_argument('--device', type=str, default='auto', help="Device for DQN: 'auto','cpu' or 'cuda'")
     parser.add_argument('--checkpoint-interval', type=int, default=200)
-    parser.add_argument('--save', type=str, default='q_table.npy')
+    parser.add_argument('--save', type=str, default='model.pth')
     parser.add_argument('--init-checkpoint', type=str, default='', help='Path to .pth to initialize DQN agent before training')
-    parser.add_argument('--algo', choices=['tabular', 'qlearning', 'dqn'], default='tabular')
     args = parser.parse_args()
 
-    # normalize alias used by UI/menu
-    algo = 'tabular' if args.algo == 'qlearning' else args.algo
-
-    # override save extension for dqn if requested
-    save_path = args.save
-    if algo == 'dqn':
-        if save_path.endswith('.npy'):
-            save_path = save_path.replace('.npy', '.pth')
-    # if level provided, pass into environment via env.level_name attribute by setting
     if args.level:
         os.environ['SNAKE_LEVEL_PATH'] = args.level
     train(
         episodes=args.episodes,
         max_steps=args.max_steps,
-        save_path=save_path,
+        save_path=args.save,
         device=args.device,
         init_checkpoint=(args.init_checkpoint or None)
     )

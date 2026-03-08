@@ -557,25 +557,19 @@ if __name__ == '__main__':
                 info['error'] = str(e)
             return info
 
-        def live_train(env, algo='dqn', max_episodes=10000, max_steps=MAX_EPISODE_MOVES, init_ckpt=None, eval_only=False):
+        def live_train(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES, init_ckpt=None, eval_only=False):
             """Run live training inside the game loop, rendering every step.
             Stops when user presses Esc/Quit or when an episode fills the board.
             If eval_only is True, no learning updates are applied.
             """
             # lazy imports
             AgentDQN = None
-            AgentQL = None
             try:
                 from dqn_agent import DQNAgent as AgentDQN
             except Exception:
                 AgentDQN = None
-            try:
-                from rl_agent import QLearningAgent as AgentQL
-            except Exception:
-                AgentQL = None
 
-            use_dqn = (algo == 'dqn')
-            if use_dqn and AgentDQN is None:
+            if AgentDQN is None:
                 # inform user
                 msg = 'DQN not available (torch missing)'
                 info_timer = 90
@@ -613,32 +607,29 @@ if __name__ == '__main__':
                     pass
 
             # create agent
-            if use_dqn:
+            try:
+                agent = AgentDQN()
+            except Exception as e:
+                msg = f'Failed to create DQN agent: {e}'
+                info_timer = 90
+                while info_timer > 0:
+                    for ev in pygame.event.get():
+                        if ev.type == pygame.QUIT:
+                            pygame.quit()
+                            sys.exit(0)
+                    env.display.fill(BLACK)
+                    env.display.blit(env.font.render(msg, True, WHITE), (10, 40))
+                    pygame.display.flip()
+                    info_timer -= 1
+                    if env.clock:
+                        env.clock.tick(30)
+                return
+            # optional init checkpoint
+            if init_ckpt:
                 try:
-                    agent = AgentDQN()
-                except Exception as e:
-                    msg = f'Failed to create DQN agent: {e}'
-                    info_timer = 90
-                    while info_timer > 0:
-                        for ev in pygame.event.get():
-                            if ev.type == pygame.QUIT:
-                                pygame.quit()
-                                sys.exit(0)
-                        env.display.fill(BLACK)
-                        env.display.blit(env.font.render(msg, True, WHITE), (10, 40))
-                        pygame.display.flip()
-                        info_timer -= 1
-                        if env.clock:
-                            env.clock.tick(30)
-                    return
-                # optional init checkpoint
-                if init_ckpt:
-                    try:
-                        agent.load(init_ckpt)
-                    except Exception:
-                        pass
-            else:
-                agent = AgentQL()
+                    agent.load(init_ckpt)
+                except Exception:
+                    pass
 
             # Optional evaluation mode: disable exploration and weight updates.
             if eval_only:
@@ -647,22 +638,20 @@ if __name__ == '__main__':
                         agent.eps = 0.0
                 except Exception:
                     pass
-                if use_dqn:
-                    try:
-                        agent.policy_net.eval()
-                    except Exception:
-                        pass
+                try:
+                    agent.policy_net.eval()
+                except Exception:
+                    pass
 
             max_cells = (env.board_blocks) * (env.board_blocks)
             action_names = {0: 'STRAIGHT', 1: 'RIGHT TURN', 2: 'LEFT TURN'}
             recent_scores = []
             recent_steps = []
             torch_mod = None
-            if use_dqn:
-                try:
-                    import torch as torch_mod
-                except Exception:
-                    torch_mod = None
+            try:
+                import torch as torch_mod
+            except Exception:
+                torch_mod = None
 
             def format_q_values(q_values):
                 if not q_values or len(q_values) < 3:
@@ -673,13 +662,12 @@ if __name__ == '__main__':
                 eps_value = float(getattr(agent, 'eps', 0.0))
                 explore = random.random() < eps_value
 
-                if use_dqn:
-                    # mirror act() side effect to keep diagnostics consistent
-                    if hasattr(agent, 'steps'):
-                        agent.steps += 1
+                # mirror act() side effect to keep diagnostics consistent
+                if hasattr(agent, 'steps'):
+                    agent.steps += 1
 
-                    if explore:
-                        return random.randrange(agent.n_actions), 'explore', eps_value, None, None
+                if explore:
+                    return random.randrange(agent.n_actions), 'explore', eps_value, None, None
 
                     try:
                         if torch_mod is not None:
@@ -699,26 +687,6 @@ if __name__ == '__main__':
                     # Fallback when torch diagnostics are unavailable
                     action_idx = agent.act(cur_state)
                     return action_idx, 'agent_fallback', eps_value, None, None
-
-                # Tabular Q-learning diagnostics
-                state_idx = None
-                q_values = None
-                try:
-                    state_idx = agent._state_to_idx(cur_state)
-                    q_values = [float(v) for v in agent.q[state_idx]]
-                except Exception:
-                    pass
-
-                if explore:
-                    action_idx = random.randrange(agent.n_actions)
-                    return action_idx, 'explore', eps_value, q_values, state_idx
-
-                if q_values:
-                    action_idx = int(max(range(len(q_values)), key=lambda i: q_values[i]))
-                    return action_idx, 'greedy', eps_value, q_values, state_idx
-
-                action_idx = agent.act(cur_state)
-                return action_idx, 'agent_fallback', eps_value, q_values, state_idx
 
             pause_requested = False
             ep = 0
@@ -785,17 +753,11 @@ if __name__ == '__main__':
 
                     # learning updates
                     if transition_ready and (not eval_only):
-                        if use_dqn:
-                            agent.push(state, action, reward, next_state, done)
-                            agent.update()
-                            if t % 100 == 0:
-                                try:
-                                    agent.sync_target()
-                                except Exception:
-                                    pass
-                        else:
+                        agent.push(state, action, reward, next_state, done)
+                        agent.update()
+                        if t % 100 == 0:
                             try:
-                                agent.learn(state, action, reward, next_state, done)
+                                agent.sync_target()
                             except Exception:
                                 pass
 
@@ -808,11 +770,8 @@ if __name__ == '__main__':
                         move_txt = action_names.get(last_action, 'n/a')
                         mode_txt = f'{last_mode} (eps={last_eps:.3f})'
                         q_txt = format_q_values(last_q_values)
-                        idx_txt = f'Table idx: {last_state_idx}' if last_state_idx is not None else 'Table idx: n/a'
-                        if use_dqn:
-                            compute_txt = f'Compute: {str(getattr(agent, "device", "cpu")).upper()}'
-                        else:
-                            compute_txt = 'Compute: CPU (tabular q-learning)'
+                        idx_txt = ''
+                        compute_txt = f'Compute: {str(getattr(agent, "device", "cpu")).upper()}'
                         run_mode_txt = 'Run mode: EVAL (no learning updates)' if eval_only else 'Run mode: TRAIN (online updates)'
                         if recent_scores:
                             avg_score50 = sum(recent_scores[-50:]) / min(50, len(recent_scores))
@@ -831,7 +790,6 @@ if __name__ == '__main__':
                             f'Move selected: {move_txt}',
                             f'Selection mode: {mode_txt}',
                             q_txt,
-                            idx_txt
                         ]
                         info_font = env.small_font or env.font
                         line_h = info_font.get_height() + 6
@@ -940,7 +898,7 @@ if __name__ == '__main__':
                                  f'{(sum(recent_steps[-50:]) / min(50, len(recent_steps))):.1f}')
                                 if recent_scores else 'Avg50 score/steps: n/a',
                                 f'Game speed: {env.speed} FPS',
-                                f'Compute: {str(getattr(agent, "device", "cpu")).upper() if use_dqn else "CPU (tabular q-learning)"}',
+                                f'Compute: {str(getattr(agent, "device", "cpu")).upper()}',
                                 f'Run mode: {"EVAL (no learning updates)" if eval_only else "TRAIN (online updates)"}',
                                 f'Last move: {action_names.get(last_action, "n/a")}',
                                 f'Last mode: {last_mode} (eps={last_eps:.3f})',
@@ -1246,11 +1204,9 @@ if __name__ == '__main__':
                     sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
                     btn_headless = pygame.Rect(sx + 20, sy + 40, 180, 40)
                     btn_live = pygame.Rect(sx + 220, sy + 40, 180, 40)
-                    btn_algo1 = pygame.Rect(sx + 20, sy + 100, 180, 40)
-                    btn_algo2 = pygame.Rect(sx + 220, sy + 100, 180, 40)
-                    btn_eval = pygame.Rect(sx + 20, sy + 160, 380, 40)
-                    btn_start = pygame.Rect(sx + 20, sy + 320, 180, 50)
-                    btn_back = pygame.Rect(sx + 220, sy + 320, 180, 50)
+                    btn_eval = pygame.Rect(sx + 20, sy + 100, 380, 40)
+                    btn_start = pygame.Rect(sx + 20, sy + 270, 180, 50)
+                    btn_back = pygame.Rect(sx + 220, sy + 270, 180, 50)
 
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -1263,27 +1219,20 @@ if __name__ == '__main__':
                             sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
                             btn_headless = pygame.Rect(sx + 20, sy + 40, 180, 40)
                             btn_live = pygame.Rect(sx + 220, sy + 40, 180, 40)
-                            btn_algo1 = pygame.Rect(sx + 20, sy + 100, 180, 40)
-                            btn_algo2 = pygame.Rect(sx + 220, sy + 100, 180, 40)
-                            btn_eval = pygame.Rect(sx + 20, sy + 160, 380, 40)
-                            btn_start = pygame.Rect(sx + 20, sy + 320, 180, 50)
-                            btn_back = pygame.Rect(sx + 220, sy + 320, 180, 50)
+                            btn_eval = pygame.Rect(sx + 20, sy + 100, 380, 40)
+                            btn_start = pygame.Rect(sx + 20, sy + 270, 180, 50)
+                            btn_back = pygame.Rect(sx + 220, sy + 270, 180, 50)
                         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                             mx, my = ev.pos
                             if btn_headless.collidepoint(mx, my):
                                 headless = True
                             elif btn_live.collidepoint(mx, my):
                                 headless = False
-                            elif btn_algo1.collidepoint(mx, my):
-                                algo = 'dqn'
-                            elif btn_algo2.collidepoint(mx, my):
-                                algo = 'qlearning'
                             elif btn_eval.collidepoint(mx, my):
                                 eval_only = not eval_only
                             elif btn_start.collidepoint(mx, my):
                                 # start training (headless uses subprocess)
-                                cli_algo = 'tabular' if algo == 'qlearning' else algo
-                                cmd = [sys.executable, 'train.py', '--algo', cli_algo]
+                                cmd = [sys.executable, 'train.py']
                                 if getattr(g, 'current_level_path', None):
                                     cmd += ['--level', g.current_level_path]
                                 if getattr(g, 'current_checkpoint_path', None):
@@ -1291,10 +1240,7 @@ if __name__ == '__main__':
                                 if headless:
                                     try:
                                         subprocess.Popen(cmd)
-                                        if algo == 'qlearning':
-                                            info_msg = 'Background training started (Q-Learning mapped to tabular).'
-                                        else:
-                                            info_msg = f'Background training started ({cli_algo}).'
+                                        info_msg = 'Background training started (DQN).'
                                     except Exception as e:
                                         info_msg = f'Failed to start: {e}'
                                     submenu = False
@@ -1303,7 +1249,6 @@ if __name__ == '__main__':
                                     try:
                                         live_train(
                                             g,
-                                            algo=algo,
                                             max_episodes=10000,
                                             max_steps=MAX_EPISODE_MOVES,
                                             init_ckpt=getattr(g, 'current_checkpoint_path', None),
@@ -1326,11 +1271,6 @@ if __name__ == '__main__':
                     pygame.draw.rect(g.display, (100,180,100) if not headless else (150,150,150), btn_live)
                     g.display.blit(g.font.render('Headless', True, BLACK), (btn_headless.x + 12, btn_headless.y + 8))
                     g.display.blit(g.font.render('Live (demo)', True, BLACK), (btn_live.x + 12, btn_live.y + 8))
-                    # algo buttons
-                    pygame.draw.rect(g.display, (100,180,100) if algo=='dqn' else (150,150,150), btn_algo1)
-                    pygame.draw.rect(g.display, (100,180,100) if algo=='qlearning' else (150,150,150), btn_algo2)
-                    g.display.blit(g.font.render('DQN', True, BLACK), (btn_algo1.x + 12, btn_algo1.y + 8))
-                    g.display.blit(g.font.render('Q-Learning', True, BLACK), (btn_algo2.x + 12, btn_algo2.y + 8))
 
                     # eval toggle for live mode
                     eval_enabled_for_mode = (not headless)
@@ -1353,7 +1293,7 @@ if __name__ == '__main__':
                     else:
                         line1 = 'Torch: not installed'
                         line2 = 'CUDA: OFF'
-                    line3 = 'Note: Q-Learning in this menu maps to train.py --algo tabular.'
+                    line3 = 'Algorithm: DQN (Deep Q-Network)'
                     line4 = 'Eval toggle applies in Live mode; headless always trains.'
                     status_lines = [line1, line2, line3, line4]
                     for i, ln in enumerate(status_lines):
