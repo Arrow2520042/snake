@@ -26,7 +26,7 @@ class SimpleNet(nn.Module):
 
 
 class DQNAgent:
-    def __init__(self, state_dim=9, n_actions=3, lr=1e-3, gamma=0.99, batch_size=64, capacity=10000, device=None):
+    def __init__(self, state_dim=9, n_actions=3, lr=1e-3, gamma=0.99, batch_size=64, capacity=10000, device=None, max_grad_norm=1.0):
         if torch is None:
             raise RuntimeError('PyTorch is required for DQNAgent')
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -45,6 +45,8 @@ class DQNAgent:
         self.eps = 1.0
         self.eps_min = 0.01
         self.eps_decay = 0.9995
+        # gradient clipping norm (None or float)
+        self.max_grad_norm = max_grad_norm
         # optimize cuDNN when using CUDA
         try:
             if self.device.startswith('cuda'):
@@ -91,6 +93,12 @@ class DQNAgent:
         loss = nn.functional.mse_loss(q_values, target)
         self.optimizer.zero_grad()
         loss.backward()
+        # gradient clipping to stabilize training (if configured)
+        try:
+            if self.max_grad_norm is not None and self.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.max_grad_norm)
+        except Exception:
+            pass
         self.optimizer.step()
 
         # eps decay

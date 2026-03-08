@@ -1,5 +1,4 @@
 import argparse
-import time
 import os
 import csv
 import datetime
@@ -12,8 +11,10 @@ try:
 except Exception:
     DQNAgent = None
 
+DEFAULT_MAX_STEPS = 15000
 
-def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto'):
+
+def train(episodes=2000, max_steps=DEFAULT_MAX_STEPS, save_path='q_table.npy', device='auto', init_checkpoint=None):
     env = SnakeGameAI(render=False)
     # If a level path was provided via env var, try to load it into env.walls
     lvl = os.environ.get('SNAKE_LEVEL_PATH')
@@ -21,7 +22,17 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
         try:
             with open(lvl, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            env.walls = set(Point(int(x), int(y)) for x, y in data)
+            # data may be stored as cell coordinates [cx,cy]; convert to pixel coords using env metrics
+            conv = set()
+            for item in data:
+                try:
+                    cx, cy = int(item[0]), int(item[1])
+                    px = getattr(env, 'board_x', 0) + cx * getattr(env, 'bs', 20)
+                    py = getattr(env, 'board_y', 0) + cy * getattr(env, 'bs', 20)
+                    conv.add(Point(int(px), int(py)))
+                except Exception:
+                    pass
+            env.walls = conv
             env.level_name = os.path.splitext(os.path.basename(lvl))[0]
         except Exception:
             env.level_name = 'default'
@@ -43,6 +54,13 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
             dev = device
         agent = DQNAgent(device=dev)
         use_dqn = True
+        # optionally initialize from checkpoint
+        if init_checkpoint:
+            try:
+                agent.load(init_checkpoint)
+                print('Loaded init checkpoint:', init_checkpoint)
+            except Exception as e:
+                print('Warning: failed to load init checkpoint:', e)
     else:
         agent = QLearningAgent()
 
@@ -69,7 +87,16 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
     csv_path = os.path.join(logs_dir, 'rewards.csv')
     csv_file = open(csv_path, 'w', newline='', encoding='utf-8')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['episode', 'reward', 'avg_last50', 'eps'])
+    csv_writer.writerow([
+        'episode',
+        'reward',
+        'score',
+        'steps',
+        'avg_reward_last50',
+        'avg_score_last50',
+        'avg_steps_last50',
+        'eps'
+    ])
 
     # write run info
     try:
@@ -85,16 +112,20 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
         pass
 
     rewards = []
+    scores = []
+    steps_hist = []
     for ep in range(1, episodes + 1):
         state = env.reset()
         # if a level file was provided via env, derive nicer name
         if hasattr(env, 'level_name') and env.level_name:
             level_name = env.level_name
         total_reward = 0
+        ep_steps = 0
         for t in range(max_steps):
             action = agent.act(state)
             next_state, reward, done, info = env.play_step(action)
             total_reward += reward
+            ep_steps = t + 1
             if use_dqn:
                 agent.push(state, action, reward, next_state, done)
                 agent.update()
@@ -107,13 +138,33 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
                 break
 
         rewards.append(total_reward)
+        scores.append(float(env.score))
+        steps_hist.append(float(ep_steps))
+
+        avg_reward_50 = float(np.mean(rewards[-50:])) if rewards else 0.0
+        avg_score_50 = float(np.mean(scores[-50:])) if scores else 0.0
+        avg_steps_50 = float(np.mean(steps_hist[-50:])) if steps_hist else 0.0
+
         if ep % 50 == 0:
-            avg = np.mean(rewards[-50:])
-            print(f'Episode {ep}/{episodes}  avg_reward_last50={avg:.2f}  eps={agent.eps:.3f}')
+            print(
+                f'Episode {ep}/{episodes}  '
+                f'avg_reward_last50={avg_reward_50:.2f}  '
+                f'avg_score_last50={avg_score_50:.2f}  '
+                f'avg_steps_last50={avg_steps_50:.1f}  '
+                f'eps={agent.eps:.3f}'
+            )
 
         # write metrics to CSV per-episode
-        avg50 = float(np.mean(rewards[-50:])) if len(rewards) >= 1 else float(total_reward)
-        csv_writer.writerow([ep, float(total_reward), avg50, float(getattr(agent, 'eps', 0.0))])
+        csv_writer.writerow([
+            ep,
+            float(total_reward),
+            float(env.score),
+            float(ep_steps),
+            avg_reward_50,
+            avg_score_50,
+            avg_steps_50,
+            float(getattr(agent, 'eps', 0.0))
+        ])
 
         # periodic checkpoint
         if ep % 200 == 0:
@@ -122,7 +173,11 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
             ckpt_path = os.path.join(logs_dir, f'{base}_ep{ep}{ext}')
             try:
                 agent.save(ckpt_path)
-                print('Saved checkpoint to', ckpt_path)
+                print(
+                    f'Saved checkpoint to {ckpt_path}  '
+                    f'avg_score_last50={avg_score_50:.2f}  '
+                    f'avg_steps_last50={avg_steps_50:.1f}'
+                )
             except Exception as e:
                 print('Warning: failed to save checkpoint:', e)
 
@@ -148,20 +203,30 @@ def train(episodes=2000, max_steps=1000, save_path='q_table.npy', device='auto')
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--episodes', type=int, default=2000)
+    parser.add_argument('--max-steps', type=int, default=DEFAULT_MAX_STEPS, help='Maximum moves per episode')
     parser.add_argument('--level', type=str, default='')
     parser.add_argument('--device', type=str, default='auto', help="Device for DQN: 'auto','cpu' or 'cuda'")
-    parser.add_argument('--level', type=str, default='')
     parser.add_argument('--checkpoint-interval', type=int, default=200)
     parser.add_argument('--save', type=str, default='q_table.npy')
-    parser.add_argument('--algo', choices=['tabular', 'dqn'], default='tabular')
+    parser.add_argument('--init-checkpoint', type=str, default='', help='Path to .pth to initialize DQN agent before training')
+    parser.add_argument('--algo', choices=['tabular', 'qlearning', 'dqn'], default='tabular')
     args = parser.parse_args()
+
+    # normalize alias used by UI/menu
+    algo = 'tabular' if args.algo == 'qlearning' else args.algo
 
     # override save extension for dqn if requested
     save_path = args.save
-    if args.algo == 'dqn':
+    if algo == 'dqn':
         if save_path.endswith('.npy'):
             save_path = save_path.replace('.npy', '.pth')
     # if level provided, pass into environment via env.level_name attribute by setting
     if args.level:
         os.environ['SNAKE_LEVEL_PATH'] = args.level
-    train(episodes=args.episodes, save_path=save_path, device=args.device)
+    train(
+        episodes=args.episodes,
+        max_steps=args.max_steps,
+        save_path=save_path,
+        device=args.device,
+        init_checkpoint=(args.init_checkpoint or None)
+    )

@@ -9,6 +9,7 @@ class QLearningAgent:
     def __init__(self, n_actions=3, bins=11, lr=0.1, gamma=0.99, eps_start=1.0, eps_min=0.01, eps_decay=0.9995):
         self.n_actions = n_actions
         self.bins = bins
+        self.bins_minus1 = bins - 1
         self.lr = lr
         self.gamma = gamma
         self.eps = eps_start
@@ -49,10 +50,18 @@ class QLearningAgent:
         # food_dx, food_dy in approx range [-1,1]
         fx = float(state[7])
         fy = float(state[8])
-        bx = int(((fx + 1.0) / 2.0) * (self.bins - 1))
-        by = int(((fy + 1.0) / 2.0) * (self.bins - 1))
-        bx = max(0, min(self.bins - 1, bx))
-        by = max(0, min(self.bins - 1, by))
+        # normalize and discretize into bins
+        scale = self.bins_minus1
+        bx = int(((fx + 1.0) * 0.5) * scale)
+        by = int(((fy + 1.0) * 0.5) * scale)
+        if bx < 0:
+            bx = 0
+        elif bx > scale:
+            bx = scale
+        if by < 0:
+            by = 0
+        elif by > scale:
+            by = scale
 
         idx = (((danger_idx * self.n_dirs) + dir_idx) * self.bins + bx) * self.bins + by
         return int(idx)
