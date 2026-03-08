@@ -30,7 +30,8 @@ def recompute_layout(self):
 
     self.board_w = self.bs * self.board_blocks
     self.board_h = self.bs * self.board_blocks
-    self.board_x = self.w - ui_margin - self.board_w
+    board_area_start = self.left_panel_width + ui_margin * 2
+    self.board_x = board_area_start + max(0, (avail_w - self.board_w) // 2)
     self.board_y = content_top + max(0, (avail_h - self.board_h) // 2)
 
     self.left_panel_rect = pygame.Rect(ui_margin, content_top, self.left_panel_width, content_h)
@@ -73,4 +74,5 @@ def get_left_control_rects(self, panel_h=260):
     btn_pause = pygame.Rect(panel_x, btn_y, pause_w, 34)
     btn_plus = pygame.Rect(btn_pause.right + btn_gap, btn_y, small_w, 32)
     btn_minus = pygame.Rect(btn_plus.right + btn_gap, btn_y, small_w, 32)
-    return panel_rect, btn_pause, btn_plus, btn_minus
+    btn_stop = pygame.Rect(panel_x, btn_minus.bottom + btn_gap, pause_w, 34)
+    return panel_rect, btn_pause, btn_plus, btn_minus, btn_stop

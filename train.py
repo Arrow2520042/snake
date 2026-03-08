@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import copy
 import csv
 import datetime
 import json
@@ -70,7 +71,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           f'logs -> {log_dir}')
 
     best_score = 0
+    best_state_dict = None
     t_start = time.time()
+    recent_scores = []
 
     for ep in range(1, episodes + 1):
         state = env.reset()
@@ -89,14 +92,16 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 break
 
         score = env.score
+        recent_scores.append(score)
+        avg50 = sum(recent_scores[-50:]) / len(recent_scores[-50:])
         if score > best_score:
             best_score = score
-            agent.save(os.path.join(log_dir, 'best.pth'))
+            best_state_dict = copy.deepcopy(agent.policy_net.state_dict())
 
         with open(csv_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                ep, score, f'{total_reward:.2f}', ep_steps,
+                ep, f'{avg50:.2f}', f'{total_reward:.2f}', ep_steps,
                 f'{agent.eps:.4f}',
                 datetime.datetime.now().strftime('%Y%m%d-%H%M%S'),
             ])
@@ -113,6 +118,10 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
     agent.save(os.path.join(log_dir, save_path))
     agent.save(save_path)
+    if best_state_dict is not None:
+        import torch as _torch
+        _torch.save(best_state_dict, os.path.join(log_dir, 'best.pth'))
+        _torch.save(best_state_dict, 'best.pth')
     print(f'Done. Best score: {best_score}. Model saved to {save_path}')
 
     try:

@@ -438,9 +438,35 @@ if __name__ == '__main__':
         btn4_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 120, btn_w, btn_h)
         btn5_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 210, btn_w, btn_h)
 
+        # -- helper: session persistence --------------------------------
+        _SESSION_CFG = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'session_cfg.json')
+
+        def _load_session_cfg():
+            try:
+                with open(_SESSION_CFG, 'r', encoding='utf-8') as _f:
+                    return json.load(_f)
+            except Exception:
+                return {}
+
+        def _save_session_cfg(**kwargs):
+            try:
+                _d = _load_session_cfg()
+                _d.update(kwargs)
+                with open(_SESSION_CFG, 'w', encoding='utf-8') as _f:
+                    json.dump(_d, _f)
+            except Exception:
+                pass
+
         g.current_level_name = None
         g.current_level_path = None
         g.current_checkpoint_path = None
+        _sess = _load_session_cfg()
+        if _sess.get('level_path') and os.path.isfile(_sess['level_path']):
+            g.current_level_path = _sess['level_path']
+            g.current_level_name = os.path.basename(_sess['level_path'])
+        if _sess.get('checkpoint_path') and os.path.isfile(_sess['checkpoint_path']):
+            g.current_checkpoint_path = _sess['checkpoint_path']
 
         # -- helper: file dialog ----------------------------------------
         def pick_file_dialog(filetypes, fallback_exts=('.pth',),
@@ -521,7 +547,7 @@ if __name__ == '__main__':
 
         # -- live training loop -----------------------------------------
         def live_train(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES,
-                       init_ckpt=None, eval_only=False):
+                       init_ckpt=None, eval_only=False, save_path='model.pth'):
             AgentDQN = None
             try:
                 from dqn_agent import DQNAgent as AgentDQN
@@ -589,6 +615,8 @@ if __name__ == '__main__':
                 agent.eps = 0.0
                 agent.policy_net.eval()
 
+            _live_save_path = save_path
+
             max_cells = env.board_blocks * env.board_blocks
             action_names = {0: 'STRAIGHT', 1: 'RIGHT TURN', 2: 'LEFT TURN'}
             recent_scores = []
@@ -625,7 +653,94 @@ if __name__ == '__main__':
                     pass
                 return agent.act(cur_state), 'agent_fallback', eps_value, None
 
-            pause_requested = False
+            def _wait_for_resume(env, ep, score, total_reward,
+                                 recent_scores, recent_steps,
+                                 last_action, last_q_values,
+                                 action_names, reason_text):
+                """Freeze screen after death/win. Returns True=resume, False=stop."""
+                while True:
+                    panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
+                        env._get_left_control_rects(panel_h=260)
+                    for ev in pygame.event.get():
+                        if ev.type == pygame.QUIT:
+                            pygame.quit()
+                            sys.exit(0)
+                        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                            return False
+                        if ev.type == pygame.VIDEORESIZE:
+                            env.resize_window(ev.w, ev.h)
+                        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                            mx, my = ev.pos
+                            if btn_pause.collidepoint(mx, my):
+                                return True
+                            if btn_stop.collidepoint(mx, my):
+                                return False
+                            if btn_plus.collidepoint(mx, my):
+                                env.speed += 10
+                            if btn_minus.collidepoint(mx, my):
+                                env.speed = max(10, env.speed - 10)
+                    try:
+                        env._draw_panel_box(panel_bg)
+                        n = min(50, len(recent_scores)) if recent_scores else 0
+                        if n:
+                            avg_s = sum(recent_scores[-50:]) / n
+                            avg_t = sum(recent_steps[-50:]) / n
+                            avg_txt = f'Avg50: {avg_s:.2f} / {avg_t:.1f}'
+                        else:
+                            avg_txt = 'Avg50: n/a'
+                        lines = [
+                            f'** {reason_text} **',
+                            f'Episode: {ep}  Score: {score}',
+                            f'Reward: {total_reward:.1f}',
+                            avg_txt,
+                            f'Speed: {env.speed} FPS',
+                            f'Last move: {action_names.get(last_action, "n/a")}',
+                            format_q_values(last_q_values),
+                            '',
+                            'Click Resume for next episode',
+                        ]
+                        info_font = env.small_font or env.font
+                        line_h = info_font.get_height() + 4
+                        y_off = panel_bg.y + 6
+                        max_y = panel_bg.bottom - line_h
+                        for ln in lines:
+                            if y_off > max_y:
+                                break
+                            for wrapped_ln in env._wrap_text(
+                                    ln, info_font, panel_bg.width - 12):
+                                if y_off > max_y:
+                                    break
+                                s = info_font.render(wrapped_ln, True, WHITE)
+                                env.display.blit(s, (panel_bg.x + 6, y_off))
+                                y_off += line_h
+                        # buttons
+                        pygame.draw.rect(env.display, (100, 180, 100), btn_pause)
+                        pygame.draw.rect(env.display, PANEL_BORDER, btn_pause, 2)
+                        env.display.blit(
+                            env.font.render('Resume', True, BLACK),
+                            (btn_pause.x + 8, btn_pause.y + 4))
+                        for btn in (btn_plus, btn_minus):
+                            pygame.draw.rect(env.display, (140, 140, 140), btn)
+                            pygame.draw.rect(env.display, PANEL_BORDER, btn, 2)
+                        env.display.blit(env.font.render('+', True, BLACK),
+                                         (btn_plus.x + 10, btn_plus.y + 4))
+                        env.display.blit(env.font.render('-', True, BLACK),
+                                         (btn_minus.x + 12, btn_minus.y + 4))
+                        pygame.draw.rect(env.display, (200, 80, 80), btn_stop)
+                        pygame.draw.rect(env.display, PANEL_BORDER, btn_stop, 2)
+                        env.display.blit(
+                            env.font.render('Stop', True, BLACK),
+                            (btn_stop.x + 8, btn_stop.y + 4))
+                        env._draw_footer_block([
+                            f'{reason_text} - Click Resume for next episode',
+                            'Stop: end training | Esc: menu',
+                        ])
+                        pygame.display.flip()
+                    except Exception:
+                        pass
+                    if env.clock:
+                        env.clock.tick(30)
+
             ep = 0
             running = True
             while running and ep < max_episodes:
@@ -633,19 +748,23 @@ if __name__ == '__main__':
                 state = env.reset()
                 total_reward = 0.0
                 paused = False
-                panel_bg, btn_pause, btn_plus, btn_minus = env._get_left_control_rects(
+                panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = env._get_left_control_rects(
                     panel_h=260)
 
                 last_action = None
                 last_mode = 'n/a'
                 last_eps = float(getattr(agent, 'eps', 0.0))
                 last_q_values = None
+                last_abs_dir = None
                 ep_steps = 0
                 step_info = {}
+                do_step = False
 
                 for t in range(max_steps):
-                    panel_bg, btn_pause, btn_plus, btn_minus = \
+                    panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
                         env._get_left_control_rects(panel_h=260)
+                    btn_step = pygame.Rect(
+                        btn_stop.x, btn_stop.bottom + 6, btn_stop.width, 32)
 
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -656,25 +775,29 @@ if __name__ == '__main__':
                             break
                         if ev.type == pygame.VIDEORESIZE:
                             env.resize_window(ev.w, ev.h)
-                            panel_bg, btn_pause, btn_plus, btn_minus = \
+                            panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
                                 env._get_left_control_rects(panel_h=260)
+                            btn_step = pygame.Rect(
+                                btn_stop.x, btn_stop.bottom + 6, btn_stop.width, 32)
                             max_cells = env.board_blocks * env.board_blocks
                         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                             mx, my = ev.pos
                             if btn_pause.collidepoint(mx, my):
-                                if paused:
-                                    paused = False
-                                else:
-                                    pause_requested = True
-                            if btn_plus.collidepoint(mx, my):
+                                paused = not paused
+                            elif btn_stop.collidepoint(mx, my):
+                                running = False
+                                break
+                            elif btn_plus.collidepoint(mx, my):
                                 env.speed += 10
-                            if btn_minus.collidepoint(mx, my):
-                                env.speed = max(1, env.speed - 10)
+                            elif btn_minus.collidepoint(mx, my):
+                                env.speed = max(10, env.speed - 10)
+                            elif paused and btn_step.collidepoint(mx, my):
+                                do_step = True
                     if not running:
                         break
 
                     transition_ready = False
-                    if not paused:
+                    if not paused or do_step:
                         action, last_mode, last_eps, last_q_values = \
                             choose_action_with_debug(state)
                         last_action = action
@@ -683,6 +806,8 @@ if __name__ == '__main__':
                         total_reward += reward
                         transition_ready = True
                         ep_steps += 1
+                        last_abs_dir = env.direction.name
+                        do_step = False
                     else:
                         next_state, reward, done, step_info = state, 0, False, {}
 
@@ -695,7 +820,7 @@ if __name__ == '__main__':
                     # info panel
                     try:
                         env._draw_panel_box(panel_bg)
-                        move_txt = action_names.get(last_action, 'n/a')
+                        move_txt = last_abs_dir if last_abs_dir else 'n/a'
                         mode_txt = f'{last_mode} (eps={last_eps:.3f})'
                         q_txt = format_q_values(last_q_values)
                         run_mode_txt = ('Run mode: EVAL' if eval_only
@@ -709,21 +834,29 @@ if __name__ == '__main__':
                             avg_txt = 'Avg50: n/a'
 
                         lines = [
-                            f'Episode: {ep} | Step: {t}',
-                            f'Score: {env.score} | Reward: {total_reward:.1f}',
+                            f'Episode: {ep}  Step: {ep_steps}',
+                            f'Score: {env.score}  Reward: {total_reward:.1f}',
                             avg_txt,
-                            f'Speed: {env.speed} FPS | {run_mode_txt}',
-                            f'Move: {move_txt} | {mode_txt}',
+                            f'Speed: {env.speed} FPS',
+                            run_mode_txt,
+                            f'Move: {move_txt}',
+                            mode_txt,
                             q_txt,
                         ]
                         info_font = env.small_font or env.font
-                        line_h = info_font.get_height() + 6
-                        for i, ln in enumerate(lines):
-                            clipped = env._fit_text(ln, info_font,
-                                                    panel_bg.width - 12)
-                            s = info_font.render(clipped, True, WHITE)
-                            env.display.blit(
-                                s, (panel_bg.x + 6, panel_bg.y + 6 + i * line_h))
+                        line_h = info_font.get_height() + 4
+                        y_off = panel_bg.y + 6
+                        max_y = panel_bg.bottom - line_h
+                        for ln in lines:
+                            if y_off > max_y:
+                                break
+                            for wrapped_ln in env._wrap_text(ln, info_font,
+                                                             panel_bg.width - 12):
+                                if y_off > max_y:
+                                    break
+                                s = info_font.render(wrapped_ln, True, WHITE)
+                                env.display.blit(s, (panel_bg.x + 6, y_off))
+                                y_off += line_h
 
                         # buttons
                         pygame.draw.rect(env.display,
@@ -732,7 +865,7 @@ if __name__ == '__main__':
                         pygame.draw.rect(env.display, PANEL_BORDER, btn_pause, 2)
                         env.display.blit(
                             env.font.render(
-                                'Pause (ep)' if not paused else 'Resume',
+                                'Pause' if not paused else 'Resume',
                                 True, BLACK),
                             (btn_pause.x + 8, btn_pause.y + 4))
                         for btn in (btn_plus, btn_minus):
@@ -742,16 +875,29 @@ if __name__ == '__main__':
                                          (btn_plus.x + 10, btn_plus.y + 4))
                         env.display.blit(env.font.render('-', True, BLACK),
                                          (btn_minus.x + 12, btn_minus.y + 4))
+                        pygame.draw.rect(env.display, (200, 80, 80), btn_stop)
+                        pygame.draw.rect(env.display, PANEL_BORDER, btn_stop, 2)
+                        env.display.blit(
+                            env.font.render('Stop', True, BLACK),
+                            (btn_stop.x + 8, btn_stop.y + 4))
+                        if paused:
+                            pygame.draw.rect(
+                                env.display, (80, 140, 200), btn_step)
+                            pygame.draw.rect(
+                                env.display, PANEL_BORDER, btn_step, 2)
+                            env.display.blit(
+                                env.font.render('Step', True, BLACK),
+                                (btn_step.x + 8, btn_step.y + 4))
 
                         if eval_only:
                             env._draw_footer_block([
-                                'Esc: menu | Pause: after episode ends',
+                                'Esc: menu | Pause: toggle anytime | Stop: end',
                                 'Eval mode: eps=0, no weight updates',
                                 'Speed +/-: change FPS',
                             ])
                         else:
                             env._draw_footer_block([
-                                'Esc: menu | Pause: after episode ends',
+                                'Esc: menu | Pause: toggle anytime | Stop: end',
                                 'Speed +/-: change FPS',
                                 'Panel shows model decision process',
                             ])
@@ -772,108 +918,46 @@ if __name__ == '__main__':
                             pygame.display.flip()
                         except Exception:
                             pass
+                        # Wait for user to press resume before returning to menu
+                        _wait_for_resume(env, ep, env.score, total_reward,
+                                         recent_scores, recent_steps,
+                                         last_action, last_q_values,
+                                         action_names, 'Board filled!')
                         running = False
                         break
 
                     if done:
                         if step_info.get('board_filled'):
+                            reason_text = 'Board filled!'
+                        elif step_info.get('reason') == 'collision':
+                            reason_text = 'Snake died (collision)'
+                        elif step_info.get('reason') == 'max_steps':
+                            reason_text = 'Max steps reached'
+                        else:
+                            reason_text = 'Episode ended'
+                        # Freeze screen - wait for user to click Resume
+                        resume = _wait_for_resume(
+                            env, ep, env.score, total_reward,
+                            recent_scores, recent_steps,
+                            last_action, last_q_values,
+                            action_names, reason_text)
+                        if not resume:
                             running = False
-                        pause_cnt = 30
-                        while pause_cnt > 0 and running:
-                            for ev in pygame.event.get():
-                                if ev.type == pygame.QUIT:
-                                    pygame.quit()
-                                    sys.exit(0)
-                                if (ev.type == pygame.KEYDOWN
-                                        and ev.key == pygame.K_ESCAPE):
-                                    running = False
-                                    break
-                            pause_cnt -= 1
-                            if env.clock:
-                                env.clock.tick(30)
                         break
 
                 recent_scores.append(float(env.score))
                 recent_steps.append(float(ep_steps))
 
-                # pause between episodes
-                if pause_requested:
-                    paused = True
-                    pause_requested = False
-                    while paused and running:
-                        panel_bg, btn_pause, btn_plus, btn_minus = \
-                            env._get_left_control_rects(panel_h=260)
-                        for ev in pygame.event.get():
-                            if ev.type == pygame.QUIT:
-                                pygame.quit()
-                                sys.exit(0)
-                            if ev.type == pygame.VIDEORESIZE:
-                                env.resize_window(ev.w, ev.h)
-                            if (ev.type == pygame.MOUSEBUTTONDOWN
-                                    and ev.button == 1):
-                                mx, my = ev.pos
-                                if btn_pause.collidepoint(mx, my):
-                                    paused = False
-                                    break
-                                if btn_plus.collidepoint(mx, my):
-                                    env.speed += 10
-                                if btn_minus.collidepoint(mx, my):
-                                    env.speed = max(1, env.speed - 10)
-                        try:
-                            env._draw_panel_box(panel_bg)
-                            n = min(50, len(recent_scores)) if recent_scores else 0
-                            if n:
-                                avg_s = sum(recent_scores[-50:]) / n
-                                avg_t = sum(recent_steps[-50:]) / n
-                                avg_txt = f'Avg50: {avg_s:.2f} / {avg_t:.1f}'
-                            else:
-                                avg_txt = 'Avg50: n/a'
-                            lines = [
-                                f'Paused after episode: {ep}',
-                                f'Score: {env.score} | Reward: {total_reward:.1f}',
-                                avg_txt,
-                                f'Speed: {env.speed} FPS',
-                                f'Last move: {action_names.get(last_action, "n/a")}',
-                                format_q_values(last_q_values),
-                            ]
-                            info_font = env.small_font or env.font
-                            line_h = info_font.get_height() + 6
-                            for i, ln in enumerate(lines):
-                                clipped = env._fit_text(
-                                    ln, info_font, panel_bg.width - 12)
-                                s = info_font.render(clipped, True, WHITE)
-                                env.display.blit(
-                                    s, (panel_bg.x + 6,
-                                        panel_bg.y + 6 + i * line_h))
-                            pygame.draw.rect(env.display, (100, 180, 100),
-                                             btn_pause)
-                            pygame.draw.rect(env.display, PANEL_BORDER,
-                                             btn_pause, 2)
-                            env.display.blit(
-                                env.font.render('Resume', True, BLACK),
-                                (btn_pause.x + 8, btn_pause.y + 4))
-                            for btn in (btn_plus, btn_minus):
-                                pygame.draw.rect(env.display, (140, 140, 140),
-                                                 btn)
-                                pygame.draw.rect(env.display, PANEL_BORDER,
-                                                 btn, 2)
-                            env.display.blit(env.font.render('+', True, BLACK),
-                                             (btn_plus.x + 10, btn_plus.y + 4))
-                            env.display.blit(env.font.render('-', True, BLACK),
-                                             (btn_minus.x + 12, btn_minus.y + 4))
-                            env._draw_footer_block([
-                                'Paused between episodes',
-                                'Resume to continue | Speed +/- works',
-                            ])
-                            pygame.display.flip()
-                        except Exception:
-                            pass
-                        if env.clock:
-                            env.clock.tick(30)
-
             env.reset()
+            if not eval_only:
+                try:
+                    agent.save(_live_save_path)
+                except Exception:
+                    pass
 
         # ----- main menu loop ------------------------------------------
+        _notif_msg = ''
+        _notif_frames = 0
         running = True
         while running:
             choice = None
@@ -930,6 +1014,15 @@ if __name__ == '__main__':
                         f'Checkpoint: {os.path.basename(g.current_checkpoint_path)}',
                         True, WHITE)
                     g.display.blit(s, (10, 36))
+                if _notif_frames > 0:
+                    _nf = g.small_font or g.font
+                    _ns = _nf.render(_notif_msg, True, WHITE)
+                    _nx, _ny = 10, g.h - _ns.get_height() - 24
+                    _nw, _nh = _ns.get_width() + 20, _ns.get_height() + 16
+                    pygame.draw.rect(g.display, (30, 30, 30), (_nx, _ny, _nw, _nh))
+                    pygame.draw.rect(g.display, (140, 140, 140), (_nx, _ny, _nw, _nh), 1)
+                    g.display.blit(_ns, (_nx + 10, _ny + 8))
+                    _notif_frames -= 1
                 pygame.display.flip()
                 if g.clock:
                     g.clock.tick(30)
@@ -943,30 +1036,20 @@ if __name__ == '__main__':
                     g.current_level_name = os.path.basename(res)
                     g.current_level_path = res
                     info_msg = f'Saved level: {g.current_level_name}'
-                info_timer = 45
-                while info_timer > 0:
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                    g.display.fill(BLACK)
-                    g.display.blit(g.font.render(info_msg, True, WHITE), (10, 40))
-                    pygame.display.flip()
-                    info_timer -= 1
-                    if g.clock:
-                        g.clock.tick(30)
+                _notif_msg = info_msg
+                _notif_frames = 90
 
             elif choice == '2':
                 running_demo = True
                 paused = False
                 action_names_demo = {0: 'STRAIGHT', 1: 'RIGHT', 2: 'LEFT'}
-                panel_bg, btn_pause, btn_plus, btn_minus = \
+                panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
                     g._get_left_control_rects(panel_h=220)
                 step = 0
                 last_action_d = None
                 state_d = g.get_state()
                 while running_demo:
-                    panel_bg, btn_pause, btn_plus, btn_minus = \
+                    panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
                         g._get_left_control_rects(panel_h=220)
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -983,10 +1066,13 @@ if __name__ == '__main__':
                             mx, my = ev.pos
                             if btn_pause.collidepoint(mx, my):
                                 paused = not paused
-                            if btn_plus.collidepoint(mx, my):
+                            elif btn_stop.collidepoint(mx, my):
+                                running_demo = False
+                                break
+                            elif btn_plus.collidepoint(mx, my):
                                 g.speed += 10
-                            if btn_minus.collidepoint(mx, my):
-                                g.speed = max(1, g.speed - 10)
+                            elif btn_minus.collidepoint(mx, my):
+                                g.speed = max(10, g.speed - 10)
                     if not paused:
                         act = random.randint(0, 2)
                         last_action_d = act
@@ -1022,8 +1108,12 @@ if __name__ == '__main__':
                                        (btn_plus.x + 10, btn_plus.y + 4))
                         g.display.blit(g.font.render('-', True, BLACK),
                                        (btn_minus.x + 12, btn_minus.y + 4))
+                        pygame.draw.rect(g.display, (200, 80, 80), btn_stop)
+                        pygame.draw.rect(g.display, PANEL_BORDER, btn_stop, 2)
+                        g.display.blit(g.font.render('Stop', True, BLACK),
+                                       (btn_stop.x + 8, btn_stop.y + 4))
                         g._draw_footer_block([
-                            'Esc: menu | Pause/Resume with button',
+                            'Esc: menu | Pause/Resume | Stop: end',
                             'Speed +/-: change FPS',
                             'Classic mode uses random moves',
                         ])
@@ -1033,15 +1123,6 @@ if __name__ == '__main__':
                     if paused and g.clock:
                         g.clock.tick(30)
                     if not paused and done:
-                        pause_cnt = 30
-                        while pause_cnt > 0:
-                            for ev in pygame.event.get():
-                                if ev.type == pygame.QUIT:
-                                    pygame.quit()
-                                    sys.exit(0)
-                            pause_cnt -= 1
-                            if g.clock:
-                                g.clock.tick(30)
                         running_demo = False
                 g.reset()
 
@@ -1052,21 +1133,12 @@ if __name__ == '__main__':
                     fallback_title='Select checkpoint (.pth)')
                 if path:
                     g.current_checkpoint_path = path
+                    _save_session_cfg(checkpoint_path=path)
                     info_msg = f'Checkpoint: {os.path.basename(path)}'
                 else:
                     info_msg = 'No checkpoint selected.'
-                info_timer = 45
-                while info_timer > 0:
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                    g.display.fill(BLACK)
-                    g.display.blit(g.font.render(info_msg, True, WHITE), (10, 40))
-                    pygame.display.flip()
-                    info_timer -= 1
-                    if g.clock:
-                        g.clock.tick(30)
+                _notif_msg = info_msg
+                _notif_frames = 90
 
             elif choice == '5':
                 path = pick_file_dialog(
@@ -1076,38 +1148,33 @@ if __name__ == '__main__':
                 if path:
                     g.current_level_path = path
                     g.current_level_name = os.path.basename(path)
+                    _save_session_cfg(level_path=path)
                     info_msg = f'Level: {g.current_level_name}'
                 else:
                     info_msg = 'No level selected.'
-                info_timer = 45
-                while info_timer > 0:
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                    g.display.fill(BLACK)
-                    g.display.blit(g.font.render(info_msg, True, WHITE), (10, 40))
-                    pygame.display.flip()
-                    info_timer -= 1
-                    if g.clock:
-                        g.clock.tick(30)
+                _notif_msg = info_msg
+                _notif_frames = 90
 
             elif choice == '3':
-                sub_w = 420
-                sub_h = 320
+                sub_w = 440
+                sub_h = 420
                 headless = True
                 eval_only = False
-                torch_info = detect_torch_backend()
+                train_episodes = 10000
+                train_model_name = 'model.pth'
+                active_input = None  # 'episodes' or 'model'
                 submenu = True
                 while submenu:
                     sx = g.w // 2 - sub_w // 2
                     sy = g.h // 2 - sub_h // 2
                     sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
-                    btn_headless = pygame.Rect(sx + 20, sy + 40, 180, 40)
-                    btn_live = pygame.Rect(sx + 220, sy + 40, 180, 40)
-                    btn_eval = pygame.Rect(sx + 20, sy + 100, 380, 40)
-                    btn_start = pygame.Rect(sx + 20, sy + 210, 180, 50)
-                    btn_back = pygame.Rect(sx + 220, sy + 210, 180, 50)
+                    btn_headless = pygame.Rect(sx + 20, sy + 40, 190, 40)
+                    btn_live = pygame.Rect(sx + 230, sy + 40, 190, 40)
+                    btn_eval = pygame.Rect(sx + 20, sy + 100, 400, 40)
+                    inp_ep_rect = pygame.Rect(sx + 20, sy + 172, 400, 32)
+                    inp_mn_rect = pygame.Rect(sx + 20, sy + 235, 400, 32)
+                    btn_start = pygame.Rect(sx + 20, sy + 330, 190, 50)
+                    btn_back = pygame.Rect(sx + 230, sy + 330, 190, 50)
 
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -1120,12 +1187,26 @@ if __name__ == '__main__':
                             mx, my = ev.pos
                             if btn_headless.collidepoint(mx, my):
                                 headless = True
+                                active_input = None
                             elif btn_live.collidepoint(mx, my):
                                 headless = False
+                                active_input = None
                             elif btn_eval.collidepoint(mx, my):
                                 eval_only = not eval_only
+                                active_input = None
+                            elif inp_ep_rect.collidepoint(mx, my):
+                                active_input = 'episodes'
+                            elif inp_mn_rect.collidepoint(mx, my):
+                                active_input = 'model'
                             elif btn_start.collidepoint(mx, my):
-                                cmd = [sys.executable, 'train.py']
+                                active_input = None
+                                ep_count = max(1, int(train_episodes) if str(train_episodes).isdigit() else 10000)
+                                mname = train_model_name.strip() or 'model.pth'
+                                if not mname.endswith('.pth'):
+                                    mname += '.pth'
+                                cmd = [sys.executable, 'train.py',
+                                       '--episodes', str(ep_count),
+                                       '--save', mname]
                                 if g.current_level_path:
                                     cmd += ['--level', g.current_level_path]
                                 if g.current_checkpoint_path:
@@ -1141,17 +1222,45 @@ if __name__ == '__main__':
                                 else:
                                     try:
                                         live_train(
-                                            g, max_episodes=10000,
+                                            g,
+                                            max_episodes=ep_count,
                                             max_steps=MAX_EPISODE_MOVES,
                                             init_ckpt=g.current_checkpoint_path,
-                                            eval_only=eval_only)
+                                            eval_only=eval_only,
+                                            save_path=mname)
                                         info_msg = 'Live training finished.'
                                     except Exception as e:
                                         info_msg = f'Live training failed: {e}'
                                     submenu = False
                             elif btn_back.collidepoint(mx, my):
                                 submenu = False
+                                active_input = None
+                            else:
+                                active_input = None
+                        if ev.type == pygame.KEYDOWN and active_input:
+                            if ev.key == pygame.K_ESCAPE:
+                                active_input = None
+                            elif ev.key == pygame.K_RETURN:
+                                active_input = None
+                            elif ev.key == pygame.K_BACKSPACE:
+                                if active_input == 'episodes':
+                                    train_episodes = str(train_episodes)[:-1] or '0'
+                                else:
+                                    train_model_name = train_model_name[:-1]
+                            else:
+                                ch = ev.unicode
+                                if active_input == 'episodes':
+                                    if ch.isdigit():
+                                        s_ep = str(train_episodes)
+                                        if s_ep == '0':
+                                            s_ep = ''
+                                        s_ep += ch
+                                        train_episodes = int(s_ep) if s_ep else 0
+                                else:
+                                    if ch.isprintable():
+                                        train_model_name += ch
 
+                    status_font = g.small_font or g.font
                     g.display.fill((20, 20, 20))
                     pygame.draw.rect(g.display, (60, 60, 60), sub_rect)
                     title = g.font.render('Train on Level', True, WHITE)
@@ -1184,40 +1293,47 @@ if __name__ == '__main__':
                     g.display.blit(g.font.render(elbl, True, BLACK),
                                    (btn_eval.x + 8, btn_eval.y + 8))
 
-                    status_font = g.small_font or g.font
-                    line1 = (f"Torch: {torch_info['version']}"
-                             if torch_info['installed']
-                             else 'Torch: not installed')
-                    line2 = 'Algorithm: Double DQN with PER'
-                    line3 = 'Eval applies in Live mode only.'
-                    for i, ln in enumerate([line1, line2, line3]):
+                    # Episodes input
+                    ep_label = status_font.render('Episodes:', True, WHITE)
+                    g.display.blit(ep_label, (sx + 20, sy + 152))
+                    ep_border = (255, 220, 50) if active_input == 'episodes' else (150, 150, 150)
+                    pygame.draw.rect(g.display, (40, 40, 40), inp_ep_rect)
+                    pygame.draw.rect(g.display, ep_border, inp_ep_rect, 2)
+                    ep_txt = status_font.render(str(train_episodes), True, WHITE)
+                    g.display.blit(ep_txt, (inp_ep_rect.x + 6, inp_ep_rect.y + 6))
+
+                    # Model name input
+                    mn_label = status_font.render('Model filename:', True, WHITE)
+                    g.display.blit(mn_label, (sx + 20, sy + 215))
+                    mn_border = (255, 220, 50) if active_input == 'model' else (150, 150, 150)
+                    pygame.draw.rect(g.display, (40, 40, 40), inp_mn_rect)
+                    pygame.draw.rect(g.display, mn_border, inp_mn_rect, 2)
+                    mn_display = train_model_name + ('|' if active_input == 'model' else '')
+                    mn_txt = status_font.render(
+                        g._fit_text(mn_display, status_font, inp_mn_rect.width - 12),
+                        True, WHITE)
+                    g.display.blit(mn_txt, (inp_mn_rect.x + 6, inp_mn_rect.y + 6))
+
+                    # Status lines
+                    line1 = 'Algorithm: Double DQN with PER'
+                    line2 = 'Eval applies in Live mode only.'
+                    for i, ln in enumerate([line1, line2]):
                         cl = g._fit_text(ln, status_font, sub_w - 24)
                         sf = status_font.render(cl, True, WHITE)
                         g.display.blit(
                             sf, (sx + 12,
-                                 sy + 152 + i * (status_font.get_height() + 4)))
+                                 sy + 278 + i * (status_font.get_height() + 4)))
 
                     pygame.draw.rect(g.display, (80, 200, 120), btn_start)
                     pygame.draw.rect(g.display, (200, 80, 80), btn_back)
                     g.display.blit(g.font.render('Start', True, BLACK),
-                                   (btn_start.x + 60, btn_start.y + 12))
+                                   (btn_start.x + 62, btn_start.y + 12))
                     g.display.blit(g.font.render('Back', True, BLACK),
-                                   (btn_back.x + 68, btn_back.y + 14))
+                                   (btn_back.x + 70, btn_back.y + 14))
                     pygame.display.flip()
                     if g.clock:
                         g.clock.tick(30)
 
                 if 'info_msg' in locals() and info_msg:
-                    info_timer = 45
-                    while info_timer > 0:
-                        for ev in pygame.event.get():
-                            if ev.type == pygame.QUIT:
-                                pygame.quit()
-                                sys.exit(0)
-                        g.display.fill(BLACK)
-                        g.display.blit(
-                            g.font.render(info_msg, True, WHITE), (10, 40))
-                        pygame.display.flip()
-                        info_timer -= 1
-                        if g.clock:
-                            g.clock.tick(30)
+                    _notif_msg = info_msg
+                    _notif_frames = 90

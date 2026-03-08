@@ -1,0 +1,6 @@
+level_path: E:/vsc projects/snake/levels/level2_20260308-154338.json
+init_checkpoint: E:/vsc projects/snake/v2.pth
+episodes: 1000
+max_steps: 15000
+board_size: 20
+started: 20260308-173142
