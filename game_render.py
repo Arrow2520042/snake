@@ -19,38 +19,47 @@ def update_ui(self):
 
     disp = self.display
     bs = self.bs
+    bx = self.board_x
+    by = self.board_y
     disp.fill(black)
 
-    for pt in self.snake:
-        if pt.x < self.board_x or pt.x >= self.board_x + self.board_w:
-            continue
-        r_outer = pygame.Rect(pt.x, pt.y, bs, bs)
-        r_inner = pygame.Rect(pt.x + 4, pt.y + 4, bs - 8, bs - 8)
+    # Draw snake (cell coords → pixel)
+    for cell in self.snake:
+        px = bx + cell[0] * bs
+        py = by + cell[1] * bs
+        r_outer = pygame.Rect(px, py, bs, bs)
+        r_inner = pygame.Rect(px + 4, py + 4, bs - 8, bs - 8)
         pygame.draw.rect(disp, blue1, r_outer)
         pygame.draw.rect(disp, blue2, r_inner)
 
-    pygame.draw.rect(disp, red, pygame.Rect(self.food.x, self.food.y, bs, bs))
+    # Draw food
+    if self.food:
+        fx = bx + self.food[0] * bs
+        fy = by + self.food[1] * bs
+        pygame.draw.rect(disp, red, pygame.Rect(fx, fy, bs, bs))
 
+    # Draw walls
     walls = getattr(self, 'walls', None)
     if walls:
-        for w in walls:
-            pygame.draw.rect(disp, (100, 100, 100), pygame.Rect(w.x, w.y, bs, bs))
+        for cell in walls:
+            wx = bx + cell[0] * bs
+            wy = by + cell[1] * bs
+            pygame.draw.rect(disp, (100, 100, 100), pygame.Rect(wx, wy, bs, bs))
 
-    board_rect = pygame.Rect(self.board_x, self.board_y, self.board_w, self.board_h)
+    # Board border
+    board_rect = pygame.Rect(bx, by, self.board_w, self.board_h)
     pygame.draw.rect(disp, board_border, board_rect, 2)
 
-    try:
-        disp.fill(panel_bg, rect=self.left_panel_rect)
-        pygame.draw.rect(disp, panel_border, self.left_panel_rect, 2)
-
-        disp.fill(footer_bg, rect=self.footer_rect)
-        pygame.draw.rect(disp, footer_border, self.footer_rect, 2)
-    except Exception:
-        pass
+    # Panels
+    disp.fill(panel_bg, rect=self.left_panel_rect)
+    pygame.draw.rect(disp, panel_border, self.left_panel_rect, 2)
+    disp.fill(footer_bg, rect=self.footer_rect)
+    pygame.draw.rect(disp, footer_border, self.footer_rect, 2)
 
     if hasattr(self, 'generation'):
         gen_text = self.font.render(f'Gen: {self.generation}', True, white)
-        gr = pygame.Rect(self.w - gen_text.get_width() - 12, 4, gen_text.get_width() + 8, gen_text.get_height() + 4)
+        gr = pygame.Rect(self.w - gen_text.get_width() - 12, 4,
+                         gen_text.get_width() + 8, gen_text.get_height() + 4)
         disp.fill(black, rect=gr)
         disp.blit(gen_text, (gr.x + 4, gr.y))
 
@@ -97,7 +106,7 @@ def wrap_text(self, text, font, max_width):
                 lines.append(current)
                 current = word
             else:
-                lines.append(self._fit_text(word, font, max_width))
+                lines.append(fit_text(self, word, font, max_width))
                 current = ''
     if current:
         lines.append(current)
@@ -122,14 +131,14 @@ def draw_footer_block(self, lines):
 
     wrapped = []
     for line in lines:
-        wrapped.extend(self._wrap_text(line, footer_font, footer_rect.width - 16))
+        wrapped.extend(wrap_text(self, line, footer_font, footer_rect.width - 16))
 
     if len(wrapped) > max_lines:
         wrapped = wrapped[:max_lines]
-        wrapped[-1] = self._fit_text(wrapped[-1], footer_font, footer_rect.width - 16)
+        wrapped[-1] = fit_text(self, wrapped[-1], footer_font, footer_rect.width - 16)
 
     for i, line in enumerate(wrapped):
-        clipped = self._fit_text(line, footer_font, footer_rect.width - 16)
+        clipped = fit_text(self, line, footer_font, footer_rect.width - 16)
         txt = footer_font.render(clipped, True, white)
         self.display.blit(txt, (footer_rect.x + 8, footer_rect.y + 6 + i * line_h))
     return footer_rect

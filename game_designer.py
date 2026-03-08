@@ -5,18 +5,11 @@ import os
 import pygame
 
 
-def _make_point(self, x, y):
-    factory = getattr(self, 'point_factory', None)
-    if factory is not None:
-        return factory(int(x), int(y))
-    return (int(x), int(y))
-
-
 def level_designer(self):
-    """Prosty edytor poziomow: kliknij, aby dodac/usunac blok. Nacisnij Enter, aby zakonczyc."""
+    """Simple level editor: click to add/remove wall blocks. Press Enter to save."""
     if not self.render:
-        print('Level designer wymaga trybu render (GUI).')
-        return set()
+        print('Level designer requires render mode (GUI).')
+        return None
     if not hasattr(self, 'walls'):
         self.walls = set()
 
@@ -35,7 +28,7 @@ def level_designer(self):
                 pygame.quit()
                 return None
             if event.type == pygame.VIDEORESIZE:
-                self.resize_window(event.w, event.h, preserve_state=True)
+                self.resize_window(event.w, event.h)
                 back_rect = pygame.Rect(self.left_panel_rect.x + 10, self.left_panel_rect.y + 10, 90, 34)
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
@@ -45,8 +38,7 @@ def level_designer(self):
                     input_rect = pygame.Rect(
                         self.left_panel_rect.x + 20,
                         self.left_panel_rect.centery - 20,
-                        input_w,
-                        40,
+                        input_w, 40,
                     )
                     while entering:
                         for ie in pygame.event.get():
@@ -54,14 +46,14 @@ def level_designer(self):
                                 pygame.quit()
                                 return None
                             if ie.type == pygame.VIDEORESIZE:
-                                self.resize_window(ie.w, ie.h, preserve_state=True)
-                                back_rect = pygame.Rect(self.left_panel_rect.x + 10, self.left_panel_rect.y + 10, 90, 34)
+                                self.resize_window(ie.w, ie.h)
+                                back_rect = pygame.Rect(self.left_panel_rect.x + 10,
+                                                        self.left_panel_rect.y + 10, 90, 34)
                                 input_w = max(280, min(self.left_panel_rect.width - 40, 520))
                                 input_rect = pygame.Rect(
                                     self.left_panel_rect.x + 20,
                                     self.left_panel_rect.centery - 20,
-                                    input_w,
-                                    40,
+                                    input_w, 40,
                                 )
                             if ie.type == pygame.KEYDOWN:
                                 if ie.key == pygame.K_RETURN:
@@ -78,36 +70,32 @@ def level_designer(self):
                                     if ch and len(name) < 64:
                                         name += ch
 
-                        try:
-                            self._update_ui()
-                            self._draw_panel_box(input_rect)
-                            prompt_raw = 'Level name (Enter save, Esc cancel): ' + name
-                            prompt_line = self._fit_text(prompt_raw, self.small_font or self.font, input_rect.width - 12)
-                            prompt = (self.small_font or self.font).render(prompt_line, True, white)
-                            self.display.blit(prompt, (input_rect.x + 6, input_rect.y + 10))
-                            self._draw_footer_block([
-                                'Type level name and press Enter to save',
-                                'Esc cancels naming and exits designer without save',
-                                'Window resize keeps current wall layout aligned'
-                            ])
-                            pygame.display.flip()
-                        except Exception:
-                            pass
+                        self._update_ui()
+                        self._draw_panel_box(input_rect)
+                        prompt_raw = 'Level name (Enter save, Esc cancel): ' + name
+                        prompt_line = self._fit_text(prompt_raw, self.small_font or self.font,
+                                                     input_rect.width - 12)
+                        prompt = (self.small_font or self.font).render(prompt_line, True, white)
+                        self.display.blit(prompt, (input_rect.x + 6, input_rect.y + 10))
+                        self._draw_footer_block([
+                            'Type level name and press Enter to save',
+                            'Esc cancels naming and exits designer without save',
+                        ])
+                        pygame.display.flip()
                         if self.clock:
                             self.clock.tick(30)
 
                     if not name:
                         return None
 
-                    levels_dir = os.path.join('levels')
+                    levels_dir = 'levels'
                     os.makedirs(levels_dir, exist_ok=True)
                     safe = ''.join(c for c in name if c.isalnum() or c in (' ', '-', '_')).rstrip()
                     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
                     level_name = f'{safe}_{ts}.json'
                     level_path = os.path.join(levels_dir, level_name)
                     try:
-                        data = [[p.x - self.board_x, p.y - self.board_y] for p in sorted(self.walls, key=lambda x: (x.x, x.y))]
-                        data_cells = [[int(x // self.bs), int(y // self.bs)] for x, y in data]
+                        data_cells = sorted([list(cell) for cell in self.walls])
                         with open(level_path, 'w', encoding='utf-8') as f:
                             json.dump(data_cells, f)
                         status_msg = f'Saved {level_name}'
@@ -118,11 +106,7 @@ def level_designer(self):
 
                 if event.key == pygame.K_s:
                     try:
-                        data_cells = []
-                        for p in sorted(self.walls, key=lambda x: (x.x, x.y)):
-                            cx = int((p.x - self.board_x) // self.bs)
-                            cy = int((p.y - self.board_y) // self.bs)
-                            data_cells.append([cx, cy])
+                        data_cells = sorted([list(cell) for cell in self.walls])
                         with open('level.json', 'w', encoding='utf-8') as f:
                             json.dump(data_cells, f)
                         status_msg = 'Saved level.json'
@@ -134,38 +118,32 @@ def level_designer(self):
                     try:
                         with open('level.json', 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        conv = set()
+                        self.walls = set()
                         for item in data:
-                            try:
-                                cx, cy = int(item[0]), int(item[1])
-                                px = self.board_x + cx * self.bs
-                                py = self.board_y + cy * self.bs
-                                conv.add(_make_point(self, px, py))
-                            except Exception:
-                                pass
-                        self.walls = conv
+                            cx, cy = int(item[0]), int(item[1])
+                            if 0 <= cx < self.board_blocks and 0 <= cy < self.board_blocks:
+                                self.walls.add((cx, cy))
                         status_msg = 'Loaded level.json'
                     except Exception as e:
                         status_msg = f'Load error: {e}'
                     status_timer = 30
 
-                if event.key == pygame.K_ESCAPE or event.key == pygame.K_BACKSPACE:
+                if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
                     return None
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = pygame.mouse.get_pos()
                 if back_rect.collidepoint(mx, my):
                     return None
-                if mx >= self.board_x and mx < self.board_x + self.board_w and my >= self.board_y and my < self.board_y + self.board_h:
-                    cell_x = (mx - self.board_x) // self.bs
-                    cell_y = (my - self.board_y) // self.bs
-                    gx = self.board_x + cell_x * self.bs
-                    gy = self.board_y + cell_y * self.bs
-                    p = _make_point(self, gx, gy)
-                    if p in self.walls:
-                        self.walls.remove(p)
+                bx, by = self.board_x, self.board_y
+                if bx <= mx < bx + self.board_w and by <= my < by + self.board_h:
+                    cell_x = (mx - bx) // self.bs
+                    cell_y = (my - by) // self.bs
+                    cell = (cell_x, cell_y)
+                    if cell in self.walls:
+                        self.walls.discard(cell)
                     else:
-                        self.walls.add(p)
+                        self.walls.add(cell)
 
         self._update_ui()
         back_rect = pygame.Rect(self.left_panel_rect.x + 10, self.left_panel_rect.y + 10, 90, 34)
