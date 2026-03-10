@@ -16,19 +16,23 @@ class SumTree:
         self.size = 0
 
     def _propagate(self, idx, change):
-        parent = (idx - 1) // 2
-        self.tree[parent] += change
-        if parent > 0:
-            self._propagate(parent, change)
+        idx = (idx - 1) // 2
+        while idx >= 0:
+            self.tree[idx] += change
+            if idx == 0:
+                break
+            idx = (idx - 1) // 2
 
     def _retrieve(self, idx, value):
-        left = 2 * idx + 1
-        right = left + 1
-        if left >= len(self.tree):
-            return idx
-        if value <= self.tree[left]:
-            return self._retrieve(left, value)
-        return self._retrieve(right, value - self.tree[left])
+        while True:
+            left = 2 * idx + 1
+            if left >= len(self.tree):
+                return idx
+            if value <= self.tree[left]:
+                idx = left
+            else:
+                value -= self.tree[left]
+                idx = left + 1
 
     def total(self):
         return self.tree[0]
@@ -194,15 +198,14 @@ class NStepBuffer:
 
 
 class DQNAgent:
-    """Dueling Double DQN with n-step returns, soft target update, and PER.
-    CPU-only.  State vector has 23 features by default.
-    """
+    """Dueling Double DQN with n-step returns, soft target update, PER, and CUDA."""
 
     STATE_DIM = 26
 
     def __init__(self, state_dim=26, n_actions=3, lr=1e-3, gamma=0.99,
                  batch_size=256, capacity=500_000, tau=0.005, max_grad_norm=1.0,
-                 n_step=5):
+                 n_step=20):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.n_actions = n_actions
         self.gamma = gamma
         self.batch_size = batch_size
@@ -210,8 +213,8 @@ class DQNAgent:
         self.max_grad_norm = max_grad_norm
         self.n_step = n_step
 
-        self.policy_net = DuelingNet(state_dim, n_actions)
-        self.target_net = DuelingNet(state_dim, n_actions)
+        self.policy_net = DuelingNet(state_dim, n_actions).to(self.device)
+        self.target_net = DuelingNet(state_dim, n_actions).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -230,8 +233,27 @@ class DQNAgent:
         if random.random() < self.eps:
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0)
+            s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
             return int(torch.argmax(self.policy_net(s)).item())
+
+    def act_batch(self, states):
+        """Select actions for a batch of states in a single forward pass."""
+        n = len(states)
+        self.steps += n
+        rands = np.random.random(n)
+        explore_mask = rands < self.eps
+        random_actions = np.random.randint(0, self.n_actions, size=n)
+
+        if explore_mask.all():
+            return random_actions
+
+        with torch.no_grad():
+            batch = torch.as_tensor(np.array(states), dtype=torch.float32).to(self.device)
+            q_values = self.policy_net(batch)
+            greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+
+        actions = np.where(explore_mask, random_actions, greedy_actions)
+        return actions
 
     def push(self, env_id, state, action, reward, next_state, done):
         """Push a transition through the n-step buffer for env_id."""
@@ -254,12 +276,13 @@ class DQNAgent:
             return
 
         s, a, r, ns, d, indices, weights = sample
-        s_t = torch.as_tensor(s, dtype=torch.float32)
-        a_t = torch.as_tensor(a, dtype=torch.int64).unsqueeze(1)
-        r_t = torch.as_tensor(r, dtype=torch.float32).unsqueeze(1)
-        ns_t = torch.as_tensor(ns, dtype=torch.float32)
-        d_t = torch.as_tensor(d, dtype=torch.float32).unsqueeze(1)
-        w_t = torch.as_tensor(weights, dtype=torch.float32).unsqueeze(1)
+        dev = self.device
+        s_t = torch.as_tensor(s, dtype=torch.float32).to(dev)
+        a_t = torch.as_tensor(a, dtype=torch.int64).unsqueeze(1).to(dev)
+        r_t = torch.as_tensor(r, dtype=torch.float32).unsqueeze(1).to(dev)
+        ns_t = torch.as_tensor(ns, dtype=torch.float32).to(dev)
+        d_t = torch.as_tensor(d, dtype=torch.float32).unsqueeze(1).to(dev)
+        w_t = torch.as_tensor(weights, dtype=torch.float32).unsqueeze(1).to(dev)
 
         q_values = self.policy_net(s_t).gather(1, a_t)
 
@@ -270,7 +293,7 @@ class DQNAgent:
             gamma_n = self.gamma ** self.n_step
             target = r_t + gamma_n * next_q * (1.0 - d_t)
 
-        td_errors = (q_values - target).detach().squeeze(1).numpy()
+        td_errors = (q_values - target).detach().cpu().squeeze(1).numpy()
         loss = (w_t * nn.functional.mse_loss(q_values, target, reduction='none')).mean()
 
         self.optimizer.zero_grad()
@@ -309,7 +332,7 @@ class DQNAgent:
         }, path)
 
     def load(self, path, weights_only=False):
-        data = torch.load(path, map_location='cpu')
+        data = torch.load(path, map_location=self.device, weights_only=False)
         if isinstance(data, dict) and 'policy_net' in data:
             self.policy_net.load_state_dict(data['policy_net'])
             self.target_net.load_state_dict(data['target_net'])

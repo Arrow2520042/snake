@@ -1,13 +1,13 @@
-"""Headless training script for Snake DQN agent.
+"""Headless training script for Snake DQN/CNN agent.
 
 Supports N parallel environments (single-threaded, round-robin stepping)
-for higher throughput on multi-core CPUs.
+for higher throughput.  CUDA used automatically when available.
 
 Usage:
     python train.py --episodes 1000
+    python train.py --agent cnn --simple-rewards --board-size 10 --num-envs 64
     python train.py --level levels/mymap.json --board-size 20
     python train.py --init-checkpoint model.pth --episodes 500
-    python train.py --num-envs 8 --episodes 2000
 """
 
 import argparse
@@ -36,8 +36,17 @@ def _load_walls(level_path, board_blocks):
 
 def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           init_checkpoint=None, log_name=None, save_path='model.pth',
-          board_size=20, num_envs=1, fresh=False):
-    from dqn_agent import DQNAgent
+          board_size=20, num_envs=1, fresh=False,
+          agent_type='dqn', simple_rewards=False):
+
+    state_mode = 'grid' if agent_type == 'cnn' else 'features'
+
+    if agent_type == 'cnn':
+        from cnn_agent import CNNAgent
+        agent = CNNAgent(board_size=board_size)
+    else:
+        from dqn_agent import DQNAgent
+        agent = DQNAgent()
 
     walls = None
     if level_path and os.path.isfile(level_path):
@@ -47,12 +56,15 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     # Create parallel environments
     envs = []
     for _ in range(num_envs):
-        env = SnakeGameAI(render=False, board_blocks=board_size)
+        env = SnakeGameAI(render=False, board_blocks=board_size,
+                          state_mode=state_mode, simple_rewards=simple_rewards)
         if walls:
             env.walls = walls
         envs.append(env)
 
-    agent = DQNAgent()
+    device_name = getattr(agent, 'device', 'cpu')
+    print(f'Agent: {agent_type.upper()} | device: {device_name} | '
+          f'simple_rewards: {simple_rewards} | n_step: {agent.n_step}')
 
     if init_checkpoint and os.path.isfile(init_checkpoint):
         agent.load(init_checkpoint, weights_only=fresh)
@@ -78,6 +90,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     try:
         info_path = os.path.join(log_dir, 'info.txt')
         with open(info_path, 'w', encoding='utf-8') as fi:
+            fi.write(f'agent_type: {agent_type}\n')
+            fi.write(f'simple_rewards: {simple_rewards}\n')
+            fi.write(f'device: {getattr(agent, "device", "cpu")}\n')
             fi.write(f'level_path: {level_path}\n')
             fi.write(f'init_checkpoint: {init_checkpoint}\n')
             fi.write(f'episodes: {episodes}\n')
@@ -112,11 +127,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     ep_counter = 0  # total finished episodes
 
     while ep_counter < episodes:
-        # Step all envs
+        # Batched inference: one forward pass for all envs
+        actions = agent.act_batch(states)
+
+        # Step all envs with their actions
         for i, env in enumerate(envs):
             if ep_counter >= episodes:
                 break
-            action = agent.act(states[i])
+            action = int(actions[i])
             next_state, reward, done, info = env.play_step(action, skip_events=True)
             agent.push(i, states[i], action, reward, next_state, done)
             rewards_acc[i] += reward
@@ -216,6 +234,10 @@ if __name__ == '__main__':
     parser.add_argument('--save', type=str, default='model.pth', help='Final model filename')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
     parser.add_argument('--num-envs', type=int, default=1, help='Parallel environments (e.g. 4-8)')
+    parser.add_argument('--agent', type=str, default='dqn', choices=['dqn', 'cnn'],
+                        help='Agent type: dqn (feature vector) or cnn (grid observation)')
+    parser.add_argument('--simple-rewards', action='store_true',
+                        help='Use simplified reward: +10 food, -10 death, -0.01 step')
     parser.add_argument('--fresh', action='store_true',
                         help='Load weights only, reset training state (eps, optimizer, steps)')
     args = parser.parse_args()
@@ -231,4 +253,6 @@ if __name__ == '__main__':
         board_size=args.board_size,
         num_envs=args.num_envs,
         fresh=args.fresh,
+        agent_type=args.agent,
+        simple_rewards=args.simple_rewards,
     )

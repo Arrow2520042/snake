@@ -78,12 +78,15 @@ class SnakeGameAI:
     """
 
     def __init__(self, w=640, h=480, render=True, seed=None, speed=DEFAULT_SPEED,
-                 max_episode_steps=MAX_EPISODE_MOVES, board_blocks=BOARD_BLOCKS):
+                 max_episode_steps=MAX_EPISODE_MOVES, board_blocks=BOARD_BLOCKS,
+                 state_mode='features', simple_rewards=False):
         self.w = max(w, MIN_WINDOW_W)
         self.h = max(h, MIN_WINDOW_H)
         self.render = render
         self.speed = speed
         self.max_episode_steps = max(1, int(max_episode_steps))
+        self.state_mode = state_mode      # 'features' or 'grid'
+        self.simple_rewards = simple_rewards
         if seed is not None:
             random.seed(seed)
 
@@ -158,6 +161,14 @@ class SnakeGameAI:
         self._recent_positions = deque(maxlen=64)
         self._recent_set = set()
         self._prev_food_dist = self._manhattan_to_food()
+        self._just_ate = False
+        self._cached_flood = None
+        return self._get_obs()
+
+    def _get_obs(self):
+        """Return observation matching the current state_mode."""
+        if self.state_mode == 'grid':
+            return self.get_grid_state()
         return self.get_state()
 
     def _manhattan_to_food(self):
@@ -203,10 +214,10 @@ class SnakeGameAI:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
-                    return self.get_state(), 0, True, {"quit": True}
+                    return self._get_obs(), 0, True, {"quit": True}
 
         if self.no_food_slots:
-            return self.get_state(), 0, True, {
+            return self._get_obs(), 0, True, {
                 "score": self.score, "board_filled": True, "reason": "no_food_slots"}
 
         act_idx = action if isinstance(action, int) and 0 <= action <= 2 else self._parse_action(action)
@@ -221,79 +232,90 @@ class SnakeGameAI:
         reward = -0.01
         done = False
         self._steps_since_food += 1
+        self._just_ate = False
 
         if self.is_collision():
             done = True
             reward = -10
-            return self.get_state(), reward, done, {"score": self.score, "reason": "collision"}
+            return self._get_obs(), reward, done, {"score": self.score, "reason": "collision"}
 
         if self.frame_iteration >= self.max_episode_steps:
             done = True
             reward = -10
-            return self.get_state(), reward, done, {"score": self.score, "reason": "max_steps"}
+            return self._get_obs(), reward, done, {"score": self.score, "reason": "max_steps"}
 
         # Per-food timeout: kill episode if snake stalls too long without eating
         food_timeout = 4 * self.board_blocks * self.board_blocks
         if self._steps_since_food > food_timeout:
             done = True
             reward = -10
-            return self.get_state(), reward, done, {"score": self.score, "reason": "food_timeout"}
+            return self._get_obs(), reward, done, {"score": self.score, "reason": "food_timeout"}
 
         # Distance-based reward shaping (reduced to not punish necessary detours)
         new_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
 
         if self.head == self.food:
+            self._just_ate = True
             self.score += 1
             self._steps_since_food = 0
             self._place_food()
             self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
-            # Scale food reward by post-eat safety; penalise trap-food
-            post_eat_ratio = self._flood_fill_ratio()
-            if post_eat_ratio < 0.10:
-                reward = -5
-            elif post_eat_ratio < 0.15:
-                reward = 2
-            elif post_eat_ratio < 0.3:
-                reward = 5
-            elif post_eat_ratio < 0.5:
-                reward = 8
-            else:
+            if self.simple_rewards:
                 reward = 10
+            else:
+                # Scale food reward by post-eat safety; penalise trap-food
+                post_eat_ratio = self._flood_fill_ratio()
+                if post_eat_ratio < 0.10:
+                    reward = -5
+                elif post_eat_ratio < 0.15:
+                    reward = 2
+                elif post_eat_ratio < 0.3:
+                    reward = 5
+                elif post_eat_ratio < 0.5:
+                    reward = 8
+                else:
+                    reward = 10
         else:
             tail = self.snake.pop()
             self.snake_body_set.discard(tail)
-            if new_food_dist < self._prev_food_dist:
-                reward += 0.03
-            elif new_food_dist > self._prev_food_dist:
-                reward -= 0.03
+            if not self.simple_rewards:
+                if new_food_dist < self._prev_food_dist:
+                    reward += 0.03
+                elif new_food_dist > self._prev_food_dist:
+                    reward -= 0.03
             self._prev_food_dist = new_food_dist
 
-        # Space-awareness penalty: light, no body_ratio scaling
-        reachable_ratio = self._flood_fill_ratio()
-        self._cached_flood = reachable_ratio  # cache for get_state
-        if reachable_ratio < 0.2:
-            reward -= 0.3
-        elif reachable_ratio < 0.4:
-            reward -= 0.1
+        if not self.simple_rewards:
+            # Space-awareness penalty: light, no body_ratio scaling
+            reachable_ratio = self._flood_fill_ratio()
+            self._cached_flood = reachable_ratio  # cache for get_state
+            if reachable_ratio < 0.2:
+                reward -= 0.3
+            elif reachable_ratio < 0.4:
+                reward -= 0.1
 
-        # Hunger penalty: escalating cost for circling without eating
-        if self._steps_since_food > self.board_blocks * 2:
-            hunger_ratio = self._steps_since_food / food_timeout
-            reward -= 0.1 * hunger_ratio
+            # Hunger penalty: escalating cost for circling without eating
+            if self._steps_since_food > self.board_blocks * 2:
+                hunger_ratio = self._steps_since_food / food_timeout
+                reward -= 0.1 * hunger_ratio
 
-        # Anti-loop penalty – larger window (64) and scaled by snake length
-        if self.head in self._recent_set:
-            loop_penalty = 0.3 + 0.2 * (len(self.snake) / (self.board_blocks ** 2))
-            reward -= loop_penalty
-        self._recent_positions.append(self.head)
-        self._recent_set = set(self._recent_positions)
+            # Anti-loop penalty – larger window (64) and scaled by snake length
+            if self.head in self._recent_set:
+                loop_penalty = 0.3 + 0.2 * (len(self.snake) / (self.board_blocks ** 2))
+                reward -= loop_penalty
+            self._recent_positions.append(self.head)
+            self._recent_set = set(self._recent_positions)
+        elif self.state_mode == 'features':
+            # Simple rewards + features mode: still need flood for state vector
+            self._cached_flood = self._flood_fill_ratio()
+        # else: grid mode + simple rewards → skip BFS entirely
 
         if self.render:
             self._update_ui()
             if self.clock:
                 self.clock.tick(self.speed)
 
-        return self.get_state(), reward, done, {"score": self.score, "reason": "running"}
+        return self._get_obs(), reward, done, {"score": self.score, "reason": "running"}
 
     # -- render delegates ------------------------------------------------
     def _update_ui(self):
@@ -367,8 +389,10 @@ class SnakeGameAI:
         dir_l = _CW[(idx - 1) & 3]
         dir_b = _CW[(idx + 2) & 3]
         # Check for dangers in each direction
-        # Tail tip is safe (it moves away next step), exclude from blocking
-        tail_tip = self.snake[-1] if len(self.snake) > 1 else None
+        # Tail tip: safe only if snake did NOT just eat (tail moves on next step)
+        tail_tip = None
+        if not self._just_ate and len(self.snake) > 1:
+            tail_tip = self.snake[-1]
         danger_s = int(self._is_blocked_excluding(hx + _DIR_DX[dir_s], hy + _DIR_DY[dir_s], tail_tip))
         danger_r = int(self._is_blocked_excluding(hx + _DIR_DX[dir_r], hy + _DIR_DY[dir_r], tail_tip))
         danger_l = int(self._is_blocked_excluding(hx + _DIR_DX[dir_l], hy + _DIR_DY[dir_l], tail_tip))
@@ -550,19 +574,52 @@ class SnakeGameAI:
         return len(visited) / total_free
 
     def get_grid_state(self):
-        """4-channel grid for CNN agent: [head, body, food, walls].
-        Returns np.ndarray of shape (4, board_blocks, board_blocks).
+        """Grid state for CNN agent.
+
+        Returns flat float32 array: [4 channels * board^2, dir_onehot(4), norm_len(1)]
+        Channels:
+          0: body_age (float 0–1, newest body segment ~1.0, tail ~0.0)
+          1: head (binary)
+          2: food (binary)
+          3: walls (binary)
         """
         bb = self.board_blocks
         grid = np.zeros((4, bb, bb), dtype=np.float32)
-        grid[0, self.head[1], self.head[0]] = 1.0
-        for cell in self.snake[1:]:
-            grid[1, cell[1], cell[0]] = 1.0
+
+        # Channel 0: body age (normalized, head excluded — separate channel)
+        n = len(self.snake)
+        if n > 1:
+            for i in range(1, n):
+                cell = self.snake[i]
+                grid[0, cell[1], cell[0]] = 1.0 - (i / n)
+
+        # Channel 1: head (guard against out-of-bounds on collision frame)
+        hx, hy = self.head
+        if 0 <= hx < bb and 0 <= hy < bb:
+            grid[1, hy, hx] = 1.0
+
+        # Channel 2: food
         if self.food:
             grid[2, self.food[1], self.food[0]] = 1.0
-        for cell in self.walls:
-            grid[3, cell[1], cell[0]] = 1.0
-        return grid
+
+        # Channel 3: walls
+        if self.walls:
+            for cell in self.walls:
+                grid[3, cell[1], cell[0]] = 1.0
+
+        # Auxiliary features (appended after flattened grid)
+        dir_oh = [
+            float(self.direction == Direction.UP),
+            float(self.direction == Direction.DOWN),
+            float(self.direction == Direction.LEFT),
+            float(self.direction == Direction.RIGHT),
+        ]
+        norm_len = n / (bb * bb)
+
+        flat = np.empty(4 * bb * bb + 5, dtype=np.float32)
+        flat[:4 * bb * bb] = grid.ravel()
+        flat[4 * bb * bb:] = dir_oh + [norm_len]
+        return flat
 
 
 # ===================================================================

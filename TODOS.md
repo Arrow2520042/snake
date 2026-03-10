@@ -68,6 +68,8 @@
 - v4 state_dim 22→23: all old checkpoints incompatible
 - v5 Dueling DQN + N-step: all old checkpoints incompatible (new network class)
 - v6 state_dim 23→26: all old checkpoints incompatible
+- v8 CNN agent: new DuelingCNN architecture, old CNN checkpoints incompatible
+- v8 DQN n_step 5→20: retraining required for MLP agent as well
 
 ## Remaining roadmap
 
@@ -78,7 +80,7 @@
 
 ### Medium priority (tooling & experiments)
 - [ ] Implement curriculum learning scheduler (auto board-size progression)
-- [ ] Implement CNN agent training pipeline (full-board vision alternative)
+- [x] Implement CNN agent training pipeline (full-board vision alternative)
 - [x] Add training metrics panel: avg reward/N episodes, episode length, win-rate
 
 ### Low priority (code quality)
@@ -98,3 +100,17 @@
 - [x] Rolling avg_loss EMA tracked in DQNAgent; exposed as agent.avg_loss
 - [x] Log line extended: loss=X.XXXX sps=XXXX (training loss + env steps/sec)
 - [x] Unit tests in test_snake.py: collision, state encoding, action mapping, food placement, level load (25 tests, run: python test_snake.py)
+
+
+## Completed (v8 CNN agent + CUDA + reward reform)
+
+- [x] CNN agent: DuelingCNN with 4-channel grid (body_age, head, food, walls) + aux vector (dir, length)
+- [x] CUDA support for both DQN and CNN agents (auto-detect, fallback CPU)
+- [x] Simplified reward mode: `--simple-rewards` (+10 food, -10 death, -0.01 step only)
+- [x] n-step increased 5→20 (both agents) for better long-horizon credit assignment
+- [x] tail_tip exclusion bug fixed: after eating, tail is correctly treated as blocked
+- [x] Iterative SumTree._propagate and _retrieve (eliminates Python recursion overhead)
+- [x] `--agent cnn|dqn` flag in train.py for agent selection
+- [x] `state_mode` in SnakeGameAI: 'features' (26-dim vector) or 'grid' (flat CNN input)
+- [x] CNN + simple_rewards skips BFS entirely in play_step (major speedup)
+- [x] get_grid_state: body_age channel (normalized segment age), direction one-hot + norm_length as aux
