@@ -45,6 +45,19 @@
 - [x] Cached flood_fill in play_step, reused in get_state (saves 1 BFS/step)
 - [x] Tail-chase Manhattan distance feature added (state_dim 22→23)
 
+## Completed (v5 architecture upgrade)
+
+- [x] Dueling DQN architecture (value/advantage stream separation)
+- [x] N-step returns (n=5, per-env accumulator, compatible with PER)
+- [x] Breaking: new architecture incompatible with v4 checkpoints
+
+## Completed (v6 look-ahead & trap-food)
+
+- [x] Per-action flood fill features (simulate each action, compute reachable space)
+- [x] State vector 23→26: 3 new action_flood features (straight, right, left)
+- [x] Trap-food penalty: eating food with post_eat_ratio < 0.10 gives -5 reward
+- [x] Breaking: state_dim 23→26, old checkpoints incompatible
+
 ## Breaking changes
 
 - Old `.pth` checkpoints are incompatible (state_dim 9→18, hidden 128→256)
@@ -53,13 +66,15 @@
 - `rl_agent.py` (tabular) deleted
 - v4 reward changes: retrain or use `--fresh` with existing weights
 - v4 state_dim 22→23: all old checkpoints incompatible
+- v5 Dueling DQN + N-step: all old checkpoints incompatible (new network class)
+- v6 state_dim 23→26: all old checkpoints incompatible
 
 ## Remaining roadmap
 
 ### High priority (training quality)
 - [x] LR scheduling (ReduceLROnPlateau after score stagnation)
-- [ ] Add Dueling DQN architecture option (better value/advantage separation)
-- [x] Add training graphs (matplotlib plots via analyze_logs.py --plot)
+- [x] Add Dueling DQN architecture option (better value/advantage separation)
+- [x] Add training graphs (matplotlib plots via analyze_logs.py --plot)", "oldString": "### High priority (training quality)\n- [x] LR scheduling (ReduceLROnPlateau after score stagnation)\n- [ ] Add Dueling DQN architecture option (better value/advantage separation)\n- [x] Add training graphs (matplotlib plots via analyze_logs.py --plot)
 
 ### Medium priority (tooling & experiments)
 - [ ] Implement curriculum learning scheduler (auto board-size progression)

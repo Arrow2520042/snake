@@ -52,7 +52,7 @@ def run_single(params, episodes, max_steps, level_path, board_size, log_dir):
         for t in range(max_steps):
             action = agent.act(state)
             ns, reward, done, info = env.play_step(action, skip_events=True)
-            agent.push(state, action, reward, ns, done)
+            agent.push(0, state, action, reward, ns, done)
             agent.update()
             total_reward += reward
             state = ns

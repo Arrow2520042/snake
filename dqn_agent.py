@@ -125,51 +125,105 @@ class PrioritizedReplayBuffer:
         return self.tree.size
 
 
-class SimpleNet(nn.Module):
+class DuelingNet(nn.Module):
+    """Dueling DQN: Q(s,a) = V(s) + A(s,a) - mean(A)."""
+
     def __init__(self, input_dim, output_dim, hidden=256):
         super().__init__()
-        self.net = nn.Sequential(
+        self.feature = nn.Sequential(
             nn.Linear(input_dim, hidden),
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
+        )
+        self.value_stream = nn.Sequential(
+            nn.Linear(hidden, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        self.advantage_stream = nn.Sequential(
             nn.Linear(hidden, 128),
             nn.ReLU(),
             nn.Linear(128, output_dim),
         )
 
     def forward(self, x):
-        return self.net(x)
+        features = self.feature(x)
+        value = self.value_stream(features)
+        advantage = self.advantage_stream(features)
+        return value + advantage - advantage.mean(dim=-1, keepdim=True)
+
+
+class NStepBuffer:
+    """Per-environment n-step return accumulator."""
+
+    def __init__(self, n, gamma):
+        self.n = n
+        self.gamma = gamma
+        self.buffer = []
+
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+        if done:
+            # Flush all remaining transitions on episode end
+            return self._flush_all()
+        if len(self.buffer) >= self.n:
+            return [self._make_nstep()]
+        return []
+
+    def _make_nstep(self):
+        """Build one n-step transition from the front of the buffer."""
+        R = 0.0
+        for i in range(len(self.buffer)):
+            R += (self.gamma ** i) * self.buffer[i][2]
+        s0 = self.buffer[0][0]
+        a0 = self.buffer[0][1]
+        last = self.buffer[-1]
+        self.buffer.pop(0)
+        return (s0, a0, R, last[3], last[4], len(self.buffer) + 1)
+
+    def _flush_all(self):
+        """Flush remaining transitions at episode end."""
+        transitions = []
+        while self.buffer:
+            transitions.append(self._make_nstep())
+        return transitions
+
+    def reset(self):
+        self.buffer.clear()
 
 
 class DQNAgent:
-    """Double DQN with soft target update and Prioritized Experience Replay.
-    CPU-only.  State vector has 22 features by default.
+    """Dueling Double DQN with n-step returns, soft target update, and PER.
+    CPU-only.  State vector has 23 features by default.
     """
 
-    STATE_DIM = 23
+    STATE_DIM = 26
 
-    def __init__(self, state_dim=23, n_actions=3, lr=1e-3, gamma=0.99,
-                 batch_size=128, capacity=500_000, tau=0.005, max_grad_norm=1.0):
+    def __init__(self, state_dim=26, n_actions=3, lr=1e-3, gamma=0.99,
+                 batch_size=256, capacity=500_000, tau=0.005, max_grad_norm=1.0,
+                 n_step=5):
         self.n_actions = n_actions
         self.gamma = gamma
         self.batch_size = batch_size
         self.tau = tau
         self.max_grad_norm = max_grad_norm
+        self.n_step = n_step
 
-        self.policy_net = SimpleNet(state_dim, n_actions)
-        self.target_net = SimpleNet(state_dim, n_actions)
+        self.policy_net = DuelingNet(state_dim, n_actions)
+        self.target_net = DuelingNet(state_dim, n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=3000, min_lr=1e-5)
+            self.optimizer, mode='max', factor=0.5, patience=50, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
         self.steps = 0
         self.eps = 1.0
         self.eps_min = 0.01
         self.eps_decay = 0.9999
+        self._nstep_buffers = {}  # env_id -> NStepBuffer
 
     def act(self, state):
         self.steps += 1
@@ -179,8 +233,18 @@ class DQNAgent:
             s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0)
             return int(torch.argmax(self.policy_net(s)).item())
 
-    def push(self, state, action, reward, next_state, done):
-        self.replay.push(state, action, reward, next_state, done)
+    def push(self, env_id, state, action, reward, next_state, done):
+        """Push a transition through the n-step buffer for env_id."""
+        if env_id not in self._nstep_buffers:
+            self._nstep_buffers[env_id] = NStepBuffer(self.n_step, self.gamma)
+        transitions = self._nstep_buffers[env_id].push(state, action, reward, next_state, done)
+        for s0, a0, R, s_n, d_n, steps_used in transitions:
+            self.replay.push(s0, a0, R, s_n, d_n)
+
+    def reset_nstep(self, env_id):
+        """Reset n-step buffer for an environment (on episode boundary)."""
+        if env_id in self._nstep_buffers:
+            self._nstep_buffers[env_id].reset()
 
     def update(self):
         if len(self.replay) < self.batch_size:
@@ -199,11 +263,12 @@ class DQNAgent:
 
         q_values = self.policy_net(s_t).gather(1, a_t)
 
-        # Double DQN: select action with policy_net, evaluate with target_net
+        # Double DQN with n-step discount
         with torch.no_grad():
             best_actions = self.policy_net(ns_t).argmax(1, keepdim=True)
             next_q = self.target_net(ns_t).gather(1, best_actions)
-            target = r_t + self.gamma * next_q * (1.0 - d_t)
+            gamma_n = self.gamma ** self.n_step
+            target = r_t + gamma_n * next_q * (1.0 - d_t)
 
         td_errors = (q_values - target).detach().squeeze(1).numpy()
         loss = (w_t * nn.functional.mse_loss(q_values, target, reduction='none')).mean()
@@ -238,6 +303,7 @@ class DQNAgent:
             'scheduler': self.scheduler.state_dict(),
             'eps': self.eps,
             'steps': self.steps,
+            'n_step': self.n_step,
         }, path)
 
     def load(self, path, weights_only=False):

@@ -247,9 +247,11 @@ class SnakeGameAI:
             self._steps_since_food = 0
             self._place_food()
             self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
-            # Scale food reward by post-eat safety (always positive)
+            # Scale food reward by post-eat safety; penalise trap-food
             post_eat_ratio = self._flood_fill_ratio()
-            if post_eat_ratio < 0.15:
+            if post_eat_ratio < 0.10:
+                reward = -5
+            elif post_eat_ratio < 0.15:
                 reward = 2
             elif post_eat_ratio < 0.3:
                 reward = 5
@@ -411,9 +413,14 @@ class SnakeGameAI:
         # Tail-chase distance (Manhattan, normalized) – key for long snake survival
         tail_dist = (abs(tail[0] - hx) + abs(tail[1] - hy)) * inv_bb
 
+        # Per-action flood fill: look-ahead reachable space for each move
+        action_flood_s = self._action_flood_fill(0)
+        action_flood_r = self._action_flood_fill(1)
+        action_flood_l = self._action_flood_fill(2)
+
         # Order: 3 danger, 4 direction, 2 food delta, 4 ray-wall, 4 ray-body,
         #        1 normalized length, 1 flood_fill, 1 food_safety, 2 tail_dir,
-        #        1 tail_dist = 23
+        #        1 tail_dist, 3 action_flood = 26
         return [
             danger_s, danger_r, danger_l,
             int(self.direction == Direction.UP),
@@ -428,6 +435,7 @@ class SnakeGameAI:
             food_safety,
             tail_dx, tail_dy,
             tail_dist,
+            action_flood_s, action_flood_r, action_flood_l,
         ]
 
     def _is_blocked(self, cx, cy):
@@ -481,6 +489,62 @@ class SnakeGameAI:
                 queue.append((nx, ny))
         extra_count = 1 if extra_block and extra_block not in body_set else 0
         total_free = bb * bb - len(body_set) - extra_count - (len(walls) if walls else 0)
+        if total_free <= 0:
+            return 0.0
+        return len(visited) / total_free
+
+    def _action_flood_fill(self, action_idx):
+        """Flood fill ratio after simulating action (0=straight, 1=right, 2=left).
+
+        Predicts reachable space one step ahead so the agent can avoid
+        moves that box it in.
+        """
+        idx = _CW_IDX[self.direction]
+        if action_idx == 1:
+            idx = (idx + 1) & 3
+        elif action_idx == 2:
+            idx = (idx - 1) & 3
+        d = _CW[idx]
+        dx, dy = DIR_VECTORS[d]
+        nx, ny = self.head[0] + dx, self.head[1] + dy
+        bb = self.board_blocks
+        # Immediate collision → 0
+        if nx < 0 or nx >= bb or ny < 0 or ny >= bb:
+            return 0.0
+        if self.walls and (nx, ny) in self.walls:
+            return 0.0
+        tail_tip = self.snake[-1] if len(self.snake) > 1 else None
+        if (nx, ny) in self.snake_body_set and (nx, ny) != tail_tip:
+            return 0.0
+        # BFS from (nx, ny); old head becomes body, tail moves away
+        body_set = self.snake_body_set
+        walls = self.walls
+        head = self.head
+        visited = set()
+        queue = deque()
+        queue.append((nx, ny))
+        visited.add((nx, ny))
+        while queue:
+            cx, cy = queue.popleft()
+            for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ax, ay = cx + ddx, cy + ddy
+                if (ax, ay) in visited:
+                    continue
+                if ax < 0 or ax >= bb or ay < 0 or ay >= bb:
+                    continue
+                if (ax, ay) == head:  # old head is now body
+                    continue
+                if (ax, ay) in body_set and (ax, ay) != tail_tip:
+                    continue
+                if walls and (ax, ay) in walls:
+                    continue
+                visited.add((ax, ay))
+                queue.append((ax, ay))
+        # blocked = body_set + old head - tail (tail moves away)
+        blocked_body = len(body_set) + 1
+        if tail_tip is not None:
+            blocked_body -= 1
+        total_free = bb * bb - blocked_body - (len(walls) if walls else 0)
         if total_free <= 0:
             return 0.0
         return len(visited) / total_free
@@ -908,7 +972,7 @@ if __name__ == '__main__':
                         next_state, reward, done, step_info = state, 0, False, {}
 
                     if transition_ready and not eval_only:
-                        agent.push(state, action, reward, next_state, done)
+                        agent.push(0, state, action, reward, next_state, done)
                         agent.update()
 
                     state = next_state

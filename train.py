@@ -17,6 +17,7 @@ import json
 import os
 import time
 
+import numpy as np
 import torch
 from game import SnakeGameAI
 
@@ -68,10 +69,11 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         log_dir = os.path.join('logs', ts)
     os.makedirs(log_dir, exist_ok=True)
 
-    csv_path = os.path.join(log_dir, 'rewards.csv')
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['episode', 'score', 'total_reward', 'steps', 'eps', 'timestamp'])
+    log_path = os.path.join(log_dir, 'rewards.npz')
+    # Accumulate arrays in memory, flush periodically
+    all_scores = []
+    all_rewards = []
+    all_steps = []
 
     try:
         info_path = os.path.join(log_dir, 'info.txt')
@@ -82,14 +84,22 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'max_steps: {max_steps}\n')
             fi.write(f'board_size: {board_size}\n')
             fi.write(f'num_envs: {num_envs}\n')
+            fi.write(f'n_step: {agent.n_step}\n')
+            fi.write(f'eps_start: {agent.eps:.6f}\n')
+            fi.write(f'lr_start: {agent.optimizer.param_groups[0]["lr"]:.1e}\n')
             fi.write(f'started: {ts}\n')
     except Exception:
         pass
 
     print(f'Training {episodes} episodes | board={board_size} | '
-          f'envs={num_envs} | logs -> {log_dir}')
+          f'envs={num_envs} | updates/round={max(1, num_envs // 8)} | logs -> {log_dir}')
 
     best_score = 0
+    best_avg50 = 0.0
+    best_ckpt_path = os.path.join(log_dir, 'best.pth')
+    stagnation_counter = 0
+    STAGNATION_THRESHOLD = 3000  # episodes without avg50 improvement before rollback
+    updates_per_round = max(1, num_envs // 8)  # e.g. 64 envs → 8 updates/round
     t_start = time.time()
     recent_scores = []
     recent_rewards = []
@@ -108,7 +118,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 break
             action = agent.act(states[i])
             next_state, reward, done, info = env.play_step(action, skip_events=True)
-            agent.push(states[i], action, reward, next_state, done)
+            agent.push(i, states[i], action, reward, next_state, done)
             rewards_acc[i] += reward
             steps_acc[i] += 1
             states[i] = next_state
@@ -125,12 +135,32 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 if score > best_score:
                     best_score = score
 
-                with open(csv_path, 'a', newline='', encoding='utf-8') as f:
-                    csv.writer(f).writerow([
-                        ep_counter, score, f'{ep_reward:.2f}',
-                        steps_acc[i], f'{agent.eps:.4f}',
-                        datetime.datetime.now().strftime('%Y%m%d-%H%M%S'),
-                    ])
+                # Track best avg50 and save best checkpoint
+                if len(recent_scores) >= 50:
+                    if avg50 > best_avg50:
+                        best_avg50 = avg50
+                        stagnation_counter = 0
+                        agent.save(best_ckpt_path)
+                    else:
+                        stagnation_counter += 1
+
+                    # Rollback to best checkpoint on prolonged stagnation
+                    if stagnation_counter >= STAGNATION_THRESHOLD and os.path.isfile(best_ckpt_path):
+                        old_eps = agent.eps
+                        agent.load(best_ckpt_path)
+                        agent.eps = old_eps  # keep current exploration rate
+                        stagnation_counter = 0
+                        print(f'  >> ROLLBACK to best (avg50={best_avg50:.1f}) at ep {ep_counter}')
+
+                all_scores.append(score)
+                all_rewards.append(ep_reward)
+                all_steps.append(steps_acc[i])
+
+                if ep_counter % 500 == 0:
+                    np.savez_compressed(log_path,
+                        scores=np.array(all_scores, dtype=np.int16),
+                        rewards=np.array(all_rewards, dtype=np.float16),
+                        steps=np.array(all_steps, dtype=np.uint16))
 
                 if ep_counter % 50 == 0 or ep_counter == 1:
                     elapsed = time.time() - t_start
@@ -150,10 +180,15 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 rewards_acc[i] = 0.0
                 steps_acc[i] = 0
 
-        # One shared update per round (after stepping all envs)
-        agent.update()
+        # Multiple gradient updates per round to compensate for many envs
+        for _ in range(updates_per_round):
+            agent.update()
 
     # -- save final models ----------------------------------------------
+    np.savez_compressed(log_path,
+        scores=np.array(all_scores, dtype=np.int16),
+        rewards=np.array(all_rewards, dtype=np.float16),
+        steps=np.array(all_steps, dtype=np.uint16))
     agent.save(os.path.join(log_dir, save_path))
     agent.save(save_path)
     print(f'Done. Best score: {best_score}. Model saved to {save_path}')
@@ -163,6 +198,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         with open(run_info, 'w', encoding='utf-8') as ri:
             ri.write(f'best_score: {best_score}\n')
             ri.write(f'final_eps: {agent.eps:.6f}\n')
+            ri.write(f'final_lr: {agent.optimizer.param_groups[0]["lr"]:.1e}\n')
             ri.write(f'total_time: {time.time() - t_start:.1f}s\n')
     except Exception:
         pass
@@ -172,7 +208,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Snake DQN agent (headless)')
     parser.add_argument('--episodes', type=int, default=1000)
     parser.add_argument('--max-steps', type=int, default=15000)
-    parser.add_argument('--save-every', type=int, default=200)
+    parser.add_argument('--save-every', type=int, default=3000)
     parser.add_argument('--level', type=str, default=None, help='Path to level JSON')
     parser.add_argument('--init-checkpoint', type=str, default=None, help='Path to .pth to resume')
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')

@@ -1,13 +1,23 @@
 import csv, statistics, sys, os
+import numpy as np
+
+
+def load_data(path):
+    """Load training data from .npz (new) or .csv (legacy). Returns scores, rewards, steps."""
+    if path.endswith('.npz'):
+        d = np.load(path)
+        return d['scores'].astype(int).tolist(), d['rewards'].astype(float).tolist(), d['steps'].astype(int).tolist()
+
+    # Legacy CSV
+    with open(path, 'r') as f:
+        rows = list(csv.DictReader(f))
+    return ([int(r['score']) for r in rows],
+            [float(r['total_reward']) for r in rows],
+            [int(r['steps']) for r in rows])
+
 
 def analyze(path):
-    with open(path, 'r') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    scores = [int(r['score']) for r in rows]
-    rewards = [float(r['total_reward']) for r in rows]
-    steps = [int(r['steps']) for r in rows]
+    scores, rewards, steps = load_data(path)
 
     print(f'Total episodes: {len(scores)}')
     print(f'Score: min={min(scores)} max={max(scores)} mean={statistics.mean(scores):.1f} median={statistics.median(scores):.1f} stdev={statistics.stdev(scores):.1f}')
@@ -38,7 +48,7 @@ def plot_training(path, save_dir=None):
         print('matplotlib not installed, skipping plots')
         return
 
-    scores, rewards, steps = analyze(path)
+    scores, rewards, steps = load_data(path)
     n = len(scores)
     episodes = list(range(1, n + 1))
 
@@ -81,7 +91,9 @@ def plot_training(path, save_dir=None):
     print(f'\nPlot saved: {out_path}')
 
 if __name__ == '__main__':
-    path = sys.argv[1] if len(sys.argv) > 1 else r'E:\vsc projects\snake\logs\20260309-000302\rewards.csv'
+    # Accept .npz or .csv path
+    args = [a for a in sys.argv[1:] if not a.startswith('-')]
+    path = args[0] if args else 'rewards.npz'
     plot = '--plot' in sys.argv or '-p' in sys.argv
     if plot:
         plot_training(path)

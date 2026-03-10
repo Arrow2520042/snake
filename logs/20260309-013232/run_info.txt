@@ -1,3 +1,0 @@
-best_score: 47
-final_eps: 0.010000
-total_time: 842.3s
