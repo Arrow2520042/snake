@@ -15,9 +15,23 @@ from game import SnakeGameAI
 
 
 def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
-    from dqn_agent import DQNAgent
+    import torch
 
-    env = SnakeGameAI(render=True, speed=speed, board_blocks=board_size)
+    # Auto-detect agent type from checkpoint
+    data = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    if isinstance(data, dict) and 'board_size' in data:
+        from cnn_agent import CNNAgent
+        agent = CNNAgent(board_size=board_size)
+        state_mode = 'grid'
+        agent_type = 'CNN'
+    else:
+        from dqn_agent import DQNAgent
+        agent = DQNAgent()
+        state_mode = 'features'
+        agent_type = 'DQN'
+
+    env = SnakeGameAI(render=True, speed=speed, board_blocks=board_size,
+                      state_mode=state_mode)
 
     if level:
         import json
@@ -30,12 +44,11 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
                 walls.add((cx, cy))
         env.walls = walls
 
-    agent = DQNAgent()
     agent.load(checkpoint)
     agent.eps = 0.0
     agent.policy_net.eval()
 
-    print(f'Replaying with checkpoint: {checkpoint}')
+    print(f'Replaying with {agent_type} checkpoint: {checkpoint}')
     print(f'Speed: {speed} FPS | Episodes: {episodes}')
 
     for ep in range(1, episodes + 1):

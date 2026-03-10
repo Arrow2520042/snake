@@ -3,7 +3,6 @@ import random
 import os
 import sys
 import json
-import subprocess
 from enum import Enum
 from collections import deque
 import numpy as np
@@ -39,8 +38,7 @@ DIR_VECTORS = {
 
 _CW = (Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP)
 _CW_IDX = {d: i for i, d in enumerate(_CW)}
-_DIR_DX = {Direction.RIGHT: 1, Direction.LEFT: -1, Direction.UP: 0, Direction.DOWN: 0}
-_DIR_DY = {Direction.RIGHT: 0, Direction.LEFT: 0, Direction.UP: -1, Direction.DOWN: 1}
+
 
 # Colours
 WHITE = (255, 255, 255)
@@ -305,10 +303,14 @@ class SnakeGameAI:
                 reward -= loop_penalty
             self._recent_positions.append(self.head)
             self._recent_set = set(self._recent_positions)
-        elif self.state_mode == 'features':
-            # Simple rewards + features mode: still need flood for state vector
-            self._cached_flood = self._flood_fill_ratio()
-        # else: grid mode + simple rewards → skip BFS entirely
+        else:
+            # simple_rewards mode
+            # Hunger penalty: escalating cost for idleness (stronger than complex mode)
+            if self._steps_since_food > self.board_blocks:
+                hunger_ratio = self._steps_since_food / food_timeout
+                reward -= 0.3 * hunger_ratio
+            if self.state_mode == 'features':
+                self._cached_flood = self._flood_fill_ratio()
 
         if self.render:
             self._update_ui()
@@ -333,14 +335,6 @@ class SnakeGameAI:
     def _draw_footer_block(self, lines):
         return _render_draw_footer_block(self, lines)
 
-    def render_screen(self, mode='human'):
-        if not self.render:
-            return None
-        if mode == 'human':
-            return None
-        if mode == 'rgb_array':
-            arr = pygame.surfarray.array3d(self.display)
-            return np.transpose(arr, (1, 0, 2))
 
     def level_designer(self):
         return _designer_level_designer(self)
@@ -356,9 +350,6 @@ class SnakeGameAI:
         dx, dy = DIR_VECTORS[self.direction]
         self.head = (self.head[0] + dx, self.head[1] + dy)
 
-    def _next_cell(self, pos, direction):
-        dx, dy = DIR_VECTORS[direction]
-        return (pos[0] + dx, pos[1] + dy)
 
     def _parse_action(self, action):
         if isinstance(action, int):
@@ -393,9 +384,12 @@ class SnakeGameAI:
         tail_tip = None
         if not self._just_ate and len(self.snake) > 1:
             tail_tip = self.snake[-1]
-        danger_s = int(self._is_blocked_excluding(hx + _DIR_DX[dir_s], hy + _DIR_DY[dir_s], tail_tip))
-        danger_r = int(self._is_blocked_excluding(hx + _DIR_DX[dir_r], hy + _DIR_DY[dir_r], tail_tip))
-        danger_l = int(self._is_blocked_excluding(hx + _DIR_DX[dir_l], hy + _DIR_DY[dir_l], tail_tip))
+        dxs, dys = DIR_VECTORS[dir_s]
+        dxr, dyr = DIR_VECTORS[dir_r]
+        dxl, dyl = DIR_VECTORS[dir_l]
+        danger_s = int(self._is_blocked_excluding(hx + dxs, hy + dys, tail_tip))
+        danger_r = int(self._is_blocked_excluding(hx + dxr, hy + dyr, tail_tip))
+        danger_l = int(self._is_blocked_excluding(hx + dxl, hy + dyl, tail_tip))
         # Food delta is normalized to [-1, 1] range by dividing by board_blocks (max possible distance)
         food_dx = (self.food[0] - hx) * inv_bb
         food_dy = (self.food[1] - hy) * inv_bb
@@ -462,15 +456,6 @@ class SnakeGameAI:
             action_flood_s, action_flood_r, action_flood_l,
         ]
 
-    def _is_blocked(self, cx, cy):
-        """Fast inline collision check for a single cell."""
-        if cx < 0 or cx >= self.board_blocks or cy < 0 or cy >= self.board_blocks:
-            return True
-        if (cx, cy) in self.snake_body_set:
-            return True
-        if self.walls and (cx, cy) in self.walls:
-            return True
-        return False
 
     def _is_blocked_excluding(self, cx, cy, exclude=None):
         """Collision check that treats *exclude* cell as passable (for tail)."""
@@ -748,42 +733,53 @@ if __name__ == '__main__':
 
                 return _pygame_file_picker(fallback_exts, fallback_dirs, fallback_title)
 
-        # -- helper: torch check ----------------------------------------
-        def detect_torch_backend():
-            info = {'installed': False, 'version': 'not installed'}
-            try:
-                import torch as _torch
-                info['installed'] = True
-                info['version'] = getattr(_torch, '__version__', 'unknown')
-            except Exception:
-                pass
-            return info
+        # -- visualization loop (eval only) --------------------------------
+        def visualize_agent(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES,
+                            init_ckpt=None):
+            import torch as torch_mod
 
-        # -- live training loop -----------------------------------------
-        def live_train(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES,
-                       init_ckpt=None, eval_only=False, save_path='model.pth',
-                       resume_state=True):
-            AgentDQN = None
-            try:
-                from dqn_agent import DQNAgent as AgentDQN
-            except Exception:
-                AgentDQN = None
+            # --- detect agent type from checkpoint -----------------------
+            agent = None
+            agent_type = 'dqn'
+            if init_ckpt:
+                try:
+                    data = torch_mod.load(init_ckpt, map_location='cpu', weights_only=False)
+                    if isinstance(data, dict) and 'board_size' in data:
+                        agent_type = 'cnn'
+                except Exception:
+                    pass
 
-            if AgentDQN is None:
-                msg = 'DQN not available (torch missing)'
-                info_timer = 90
-                while info_timer > 0:
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                    env.display.fill(BLACK)
-                    env.display.blit(env.font.render(msg, True, WHITE), (10, 40))
-                    pygame.display.flip()
-                    info_timer -= 1
-                    if env.clock:
-                        env.clock.tick(30)
-                return
+            if agent_type == 'cnn':
+                from cnn_agent import CNNAgent
+                agent = CNNAgent(board_size=env.board_blocks)
+                env.state_mode = 'grid'
+            else:
+                from dqn_agent import DQNAgent
+                agent = DQNAgent()
+                env.state_mode = 'features'
+
+            if init_ckpt:
+                try:
+                    agent.load(init_ckpt)
+                except Exception as e:
+                    msg = f'Failed to load checkpoint: {e}'
+                    info_timer = 120
+                    while info_timer > 0:
+                        for ev in pygame.event.get():
+                            if ev.type == pygame.QUIT:
+                                pygame.quit()
+                                sys.exit(0)
+                        env.display.fill(BLACK)
+                        for i, ln in enumerate(env._wrap_text(msg, env.font, env.w - 40)):
+                            env.display.blit(env.font.render(ln, True, WHITE), (10, 40 + i * 30))
+                        pygame.display.flip()
+                        info_timer -= 1
+                        if env.clock:
+                            env.clock.tick(30)
+                    return
+
+            agent.eps = 0.0
+            agent.policy_net.eval()
 
             # load level
             if getattr(env, 'current_level_path', None):
@@ -796,54 +792,16 @@ if __name__ == '__main__':
                         if 0 <= cx < env.board_blocks and 0 <= cy < env.board_blocks:
                             walls.add((cx, cy))
                     env.walls = walls
-                    env.level_name = os.path.splitext(
-                        os.path.basename(env.current_level_path))[0]
                 except Exception:
                     pass
-
-            # create agent
-            try:
-                agent = AgentDQN()
-            except Exception as e:
-                msg = f'Failed to create DQN agent: {e}'
-                info_timer = 90
-                while info_timer > 0:
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                    env.display.fill(BLACK)
-                    env.display.blit(env.font.render(msg, True, WHITE), (10, 40))
-                    pygame.display.flip()
-                    info_timer -= 1
-                    if env.clock:
-                        env.clock.tick(30)
-                return
-
-            if init_ckpt:
-                try:
-                    agent.load(init_ckpt, weights_only=not resume_state)
-                except Exception:
-                    pass
-
-            if eval_only:
-                agent.eps = 0.0
-                agent.policy_net.eval()
-
-            _live_save_path = save_path
 
             max_cells = env.board_blocks * env.board_blocks
             n_walls = len(getattr(env, 'walls', set()))
-            max_score = max_cells - n_walls - 3  # total - walls - initial_snake
+            max_score = max_cells - n_walls - 3
             action_names = {0: 'STRAIGHT', 1: 'RIGHT TURN', 2: 'LEFT TURN'}
             recent_scores = []
             recent_steps = []
-
-            torch_mod = None
-            try:
-                import torch as torch_mod
-            except Exception:
-                torch_mod = None
+            device = getattr(agent, 'device', torch_mod.device('cpu'))
 
             def format_q_values(q_vals):
                 if not q_vals or len(q_vals) < 3:
@@ -851,30 +809,22 @@ if __name__ == '__main__':
                 return f'Q[S,R,L]: {q_vals[0]:.2f}, {q_vals[1]:.2f}, {q_vals[2]:.2f}'
 
             def choose_action_with_debug(cur_state):
-                eps_value = float(getattr(agent, 'eps', 0.0))
-                explore = random.random() < eps_value
-                if hasattr(agent, 'steps'):
-                    agent.steps += 1
-                if explore:
-                    return random.randrange(agent.n_actions), 'explore', eps_value, None
                 try:
-                    if torch_mod is not None:
-                        with torch_mod.no_grad():
-                            st = torch_mod.as_tensor(
-                                cur_state, dtype=torch_mod.float32).unsqueeze(0)
-                            q_out = agent.policy_net(st).squeeze(0).tolist()
-                        q_values = [float(v) for v in q_out]
-                        best = int(max(range(len(q_values)), key=lambda i: q_values[i]))
-                        return best, 'greedy', eps_value, q_values
+                    with torch_mod.no_grad():
+                        st = torch_mod.as_tensor(
+                            cur_state, dtype=torch_mod.float32
+                        ).unsqueeze(0).to(device)
+                        q_out = agent.policy_net(st).squeeze(0).cpu().tolist()
+                    q_values = [float(v) for v in q_out]
+                    best = int(max(range(len(q_values)), key=lambda i: q_values[i]))
+                    return best, q_values
                 except Exception:
-                    pass
-                return agent.act(cur_state), 'agent_fallback', eps_value, None
+                    return agent.act(cur_state), None
 
             def _wait_for_resume(env, ep, score, total_reward,
                                  recent_scores, recent_steps,
                                  last_action, last_q_values,
                                  action_names, reason_text):
-                """Freeze screen after death/win. Returns True=resume, False=stop."""
                 while True:
                     panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
                         env._get_left_control_rects(panel_h=260)
@@ -930,7 +880,6 @@ if __name__ == '__main__':
                                 s = info_font.render(wrapped_ln, True, WHITE)
                                 env.display.blit(s, (panel_bg.x + 6, y_off))
                                 y_off += line_h
-                        # buttons
                         pygame.draw.rect(env.display, (100, 180, 100), btn_pause)
                         pygame.draw.rect(env.display, PANEL_BORDER, btn_pause, 2)
                         env.display.blit(
@@ -950,7 +899,7 @@ if __name__ == '__main__':
                             (btn_stop.x + 8, btn_stop.y + 4))
                         env._draw_footer_block([
                             f'{reason_text} - Click Resume for next episode',
-                            'Stop: end training | Esc: menu',
+                            'Stop: end | Esc: menu',
                         ])
                         pygame.display.flip()
                     except Exception:
@@ -969,8 +918,6 @@ if __name__ == '__main__':
                     panel_h=260)
 
                 last_action = None
-                last_mode = 'n/a'
-                last_eps = float(getattr(agent, 'eps', 0.0))
                 last_q_values = None
                 last_abs_dir = None
                 ep_steps = 0
@@ -1013,24 +960,17 @@ if __name__ == '__main__':
                     if not running:
                         break
 
-                    transition_ready = False
                     if not paused or do_step:
-                        action, last_mode, last_eps, last_q_values = \
-                            choose_action_with_debug(state)
+                        action, last_q_values = choose_action_with_debug(state)
                         last_action = action
                         next_state, reward, done, step_info = env.play_step(
                             action, skip_events=True)
                         total_reward += reward
-                        transition_ready = True
                         ep_steps += 1
                         last_abs_dir = env.direction.name
                         do_step = False
                     else:
                         next_state, reward, done, step_info = state, 0, False, {}
-
-                    if transition_ready and not eval_only:
-                        agent.push(0, state, action, reward, next_state, done)
-                        agent.update()
 
                     state = next_state
 
@@ -1038,10 +978,7 @@ if __name__ == '__main__':
                     try:
                         env._draw_panel_box(panel_bg)
                         move_txt = last_abs_dir if last_abs_dir else 'n/a'
-                        mode_txt = f'{last_mode} (eps={last_eps:.3f})'
                         q_txt = format_q_values(last_q_values)
-                        run_mode_txt = ('Run mode: EVAL' if eval_only
-                                        else 'Run mode: TRAIN')
                         if recent_scores:
                             n = min(50, len(recent_scores))
                             avg_s = sum(recent_scores[-50:]) / n
@@ -1055,9 +992,8 @@ if __name__ == '__main__':
                             f'Score: {env.score}/{max_score}  Reward: {total_reward:.1f}',
                             avg_txt,
                             f'Speed: {env.speed} FPS',
-                            run_mode_txt,
+                            f'Agent: {agent_type.upper()} (eval)',
                             f'Move: {move_txt}',
-                            mode_txt,
                             q_txt,
                         ]
                         info_font = env.small_font or env.font
@@ -1106,18 +1042,10 @@ if __name__ == '__main__':
                                 env.font.render('Step', True, BLACK),
                                 (btn_step.x + 8, btn_step.y + 4))
 
-                        if eval_only:
-                            env._draw_footer_block([
-                                'Esc: menu | Pause: toggle anytime | Stop: end',
-                                'Eval mode: eps=0, no weight updates',
-                                'Speed +/-: change FPS',
-                            ])
-                        else:
-                            env._draw_footer_block([
-                                'Esc: menu | Pause: toggle anytime | Stop: end',
-                                'Speed +/-: change FPS',
-                                'Panel shows model decision process',
-                            ])
+                        env._draw_footer_block([
+                            'Esc: menu | Pause: toggle | Stop: end',
+                            'Speed +/-: change FPS | Step: single step (when paused)',
+                        ])
                         pygame.display.flip()
                     except Exception:
                         pass
@@ -1127,15 +1055,6 @@ if __name__ == '__main__':
 
                     occupied = len(env.snake) + len(env.walls)
                     if occupied >= max_cells:
-                        try:
-                            env.display.blit(
-                                env.font.render(
-                                    f'Episode {ep} filled board!', True, WHITE),
-                                (10, 10))
-                            pygame.display.flip()
-                        except Exception:
-                            pass
-                        # Wait for user to press resume before returning to menu
                         _wait_for_resume(env, ep, env.score, total_reward,
                                          recent_scores, recent_steps,
                                          last_action, last_q_values,
@@ -1154,7 +1073,6 @@ if __name__ == '__main__':
                             reason_text = 'Stalled (food timeout)'
                         else:
                             reason_text = 'Episode ended'
-                        # Freeze screen - wait for user to click Resume
                         resume = _wait_for_resume(
                             env, ep, env.score, total_reward,
                             recent_scores, recent_steps,
@@ -1167,12 +1085,8 @@ if __name__ == '__main__':
                 recent_scores.append(float(env.score))
                 recent_steps.append(float(ep_steps))
 
+            env.state_mode = 'features'
             env.reset()
-            if not eval_only:
-                try:
-                    agent.save(_live_save_path)
-                except Exception:
-                    pass
 
         # ----- main menu loop ------------------------------------------
         _notif_msg = ''
@@ -1213,7 +1127,7 @@ if __name__ == '__main__':
                                        g.h // 2 - 160))
                 for rect, label in [
                     (btn1_rect, 'Level Design'),
-                    (btn2_rect, 'Train on Level'),
+                    (btn2_rect, 'Visualization'),
                     (btn3_rect, 'Load checkpoint (.pth)'),
                     (btn4_rect, 'Load level (.json)'),
                 ]:
@@ -1285,14 +1199,7 @@ if __name__ == '__main__':
 
             elif choice == '2':
                 sub_w = 460
-                sub_h = 570
-                headless = True
-                eval_only = False
-                resume_training = True
-                train_episodes_str = '10000'
-                ep_cursor = len(train_episodes_str)
-                train_model_name = 'model.pth'
-                mn_cursor = len(train_model_name)
+                sub_h = 300
                 board_size_str = str(g.board_blocks)
                 bs_cursor = len(board_size_str)
                 active_input = None
@@ -1304,15 +1211,9 @@ if __name__ == '__main__':
                     sx = g.w // 2 - sub_w // 2
                     sy = g.h // 2 - sub_h // 2
                     sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
-                    btn_headless = pygame.Rect(sx + 20, sy + 40, 200, 40)
-                    btn_live = pygame.Rect(sx + 240, sy + 40, 200, 40)
-                    btn_eval = pygame.Rect(sx + 20, sy + 100, 420, 40)
-                    btn_resume = pygame.Rect(sx + 20, sy + 155, 420, 40)
-                    inp_ep_rect = pygame.Rect(sx + 20, sy + 228, 420, 32)
-                    inp_bs_rect = pygame.Rect(sx + 20, sy + 298, 420, 32)
-                    inp_mn_rect = pygame.Rect(sx + 20, sy + 368, 420, 32)
-                    btn_start = pygame.Rect(sx + 20, sy + 470, 200, 50)
-                    btn_back = pygame.Rect(sx + 240, sy + 470, 200, 50)
+                    inp_bs_rect = pygame.Rect(sx + 20, sy + 80, 420, 32)
+                    btn_start = pygame.Rect(sx + 20, sy + 200, 200, 50)
+                    btn_back = pygame.Rect(sx + 240, sy + 200, 200, 50)
 
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -1323,72 +1224,25 @@ if __name__ == '__main__':
                         if (ev.type == pygame.MOUSEBUTTONDOWN
                                 and ev.button == 1):
                             mx, my = ev.pos
-                            if btn_headless.collidepoint(mx, my):
-                                headless = True
-                                active_input = None
-                            elif btn_live.collidepoint(mx, my):
-                                headless = False
-                                active_input = None
-                            elif btn_eval.collidepoint(mx, my):
-                                eval_only = not eval_only
-                                active_input = None
-                            elif btn_resume.collidepoint(mx, my):
-                                resume_training = not resume_training
-                                active_input = None
-                            elif inp_ep_rect.collidepoint(mx, my):
-                                active_input = 'episodes'
-                                blink_timer = 0
-                            elif inp_bs_rect.collidepoint(mx, my):
+                            if inp_bs_rect.collidepoint(mx, my):
                                 active_input = 'boardsize'
-                                blink_timer = 0
-                            elif inp_mn_rect.collidepoint(mx, my):
-                                active_input = 'model'
                                 blink_timer = 0
                             elif btn_start.collidepoint(mx, my):
                                 active_input = None
-                                ep_count = max(1, int(train_episodes_str)) if train_episodes_str.isdigit() else 10000
-                                mname = train_model_name.strip() or 'model.pth'
-                                if not mname.endswith('.pth'):
-                                    mname += '.pth'
                                 bsize = max(5, int(board_size_str)) if board_size_str.isdigit() else g.board_blocks
-                                ckpt = g.current_checkpoint_path
-                                cmd = [sys.executable, 'train.py',
-                                       '--episodes', str(ep_count),
-                                       '--save', mname,
-                                       '--num-envs', '8',
-                                       '--board-size', str(bsize)]
-                                if g.current_level_path:
-                                    cmd += ['--level', g.current_level_path]
-                                if ckpt:
-                                    cmd += ['--init-checkpoint', ckpt]
-                                    if not resume_training:
-                                        cmd += ['--fresh']
-                                if headless:
-                                    try:
-                                        subprocess.Popen(cmd)
-                                        info_msg = 'Background training started.'
-                                    except Exception as e:
-                                        info_msg = f'Failed: {e}'
-                                    submenu = False
-                                else:
-                                    # Update board size for live training
-                                    if bsize != g.board_blocks:
-                                        g.board_blocks = bsize
-                                        g.layout_cfg['board_blocks'] = bsize
-                                        g._recompute_layout()
-                                    try:
-                                        live_train(
-                                            g,
-                                            max_episodes=ep_count,
-                                            max_steps=MAX_EPISODE_MOVES,
-                                            init_ckpt=ckpt,
-                                            eval_only=eval_only,
-                                            save_path=mname,
-                                            resume_state=resume_training)
-                                        info_msg = 'Live training finished.'
-                                    except Exception as e:
-                                        info_msg = f'Live training failed: {e}'
-                                    submenu = False
+                                if bsize != g.board_blocks:
+                                    g.board_blocks = bsize
+                                    g.layout_cfg['board_blocks'] = bsize
+                                    g._recompute_layout()
+                                try:
+                                    visualize_agent(
+                                        g,
+                                        max_steps=MAX_EPISODE_MOVES,
+                                        init_ckpt=g.current_checkpoint_path)
+                                    info_msg = 'Visualization finished.'
+                                except Exception as e:
+                                    info_msg = f'Visualization failed: {e}'
+                                submenu = False
                             elif btn_back.collidepoint(mx, my):
                                 submenu = False
                                 active_input = None
@@ -1396,140 +1250,40 @@ if __name__ == '__main__':
                                 active_input = None
                         if ev.type == pygame.KEYDOWN and active_input:
                             blink_timer = 0
-                            if ev.key == pygame.K_ESCAPE:
-                                active_input = None
-                            elif ev.key == pygame.K_RETURN:
+                            if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN):
                                 active_input = None
                             elif ev.key == pygame.K_LEFT:
-                                if active_input == 'episodes':
-                                    ep_cursor = max(0, ep_cursor - 1)
-                                elif active_input == 'boardsize':
-                                    bs_cursor = max(0, bs_cursor - 1)
-                                else:
-                                    mn_cursor = max(0, mn_cursor - 1)
+                                bs_cursor = max(0, bs_cursor - 1)
                             elif ev.key == pygame.K_RIGHT:
-                                if active_input == 'episodes':
-                                    ep_cursor = min(len(train_episodes_str), ep_cursor + 1)
-                                elif active_input == 'boardsize':
-                                    bs_cursor = min(len(board_size_str), bs_cursor + 1)
-                                else:
-                                    mn_cursor = min(len(train_model_name), mn_cursor + 1)
+                                bs_cursor = min(len(board_size_str), bs_cursor + 1)
                             elif ev.key == pygame.K_HOME:
-                                if active_input == 'episodes':
-                                    ep_cursor = 0
-                                elif active_input == 'boardsize':
-                                    bs_cursor = 0
-                                else:
-                                    mn_cursor = 0
+                                bs_cursor = 0
                             elif ev.key == pygame.K_END:
-                                if active_input == 'episodes':
-                                    ep_cursor = len(train_episodes_str)
-                                elif active_input == 'boardsize':
-                                    bs_cursor = len(board_size_str)
-                                else:
-                                    mn_cursor = len(train_model_name)
+                                bs_cursor = len(board_size_str)
                             elif ev.key == pygame.K_BACKSPACE:
-                                if active_input == 'episodes':
-                                    if ep_cursor > 0:
-                                        train_episodes_str = train_episodes_str[:ep_cursor-1] + train_episodes_str[ep_cursor:]
-                                        ep_cursor -= 1
-                                elif active_input == 'boardsize':
-                                    if bs_cursor > 0:
-                                        board_size_str = board_size_str[:bs_cursor-1] + board_size_str[bs_cursor:]
-                                        bs_cursor -= 1
-                                else:
-                                    if mn_cursor > 0:
-                                        train_model_name = train_model_name[:mn_cursor-1] + train_model_name[mn_cursor:]
-                                        mn_cursor -= 1
+                                if bs_cursor > 0:
+                                    board_size_str = board_size_str[:bs_cursor-1] + board_size_str[bs_cursor:]
+                                    bs_cursor -= 1
                             elif ev.key == pygame.K_DELETE:
-                                if active_input == 'episodes':
-                                    if ep_cursor < len(train_episodes_str):
-                                        train_episodes_str = train_episodes_str[:ep_cursor] + train_episodes_str[ep_cursor+1:]
-                                elif active_input == 'boardsize':
-                                    if bs_cursor < len(board_size_str):
-                                        board_size_str = board_size_str[:bs_cursor] + board_size_str[bs_cursor+1:]
-                                else:
-                                    if mn_cursor < len(train_model_name):
-                                        train_model_name = train_model_name[:mn_cursor] + train_model_name[mn_cursor+1:]
+                                if bs_cursor < len(board_size_str):
+                                    board_size_str = board_size_str[:bs_cursor] + board_size_str[bs_cursor+1:]
                             else:
                                 ch = ev.unicode
-                                if active_input == 'episodes':
-                                    if ch and ch.isdigit():
-                                        train_episodes_str = train_episodes_str[:ep_cursor] + ch + train_episodes_str[ep_cursor:]
-                                        ep_cursor += 1
-                                elif active_input == 'boardsize':
-                                    if ch and ch.isdigit():
-                                        board_size_str = board_size_str[:bs_cursor] + ch + board_size_str[bs_cursor:]
-                                        bs_cursor += 1
-                                else:
-                                    if ch and ch.isprintable():
-                                        train_model_name = train_model_name[:mn_cursor] + ch + train_model_name[mn_cursor:]
-                                        mn_cursor += 1
+                                if ch and ch.isdigit():
+                                    board_size_str = board_size_str[:bs_cursor] + ch + board_size_str[bs_cursor:]
+                                    bs_cursor += 1
 
                     status_font = g.small_font or g.font
                     g.display.fill((20, 20, 20))
                     pygame.draw.rect(g.display, (60, 60, 60), sub_rect)
-                    title = g.font.render('Train on Level', True, WHITE)
+                    title = g.font.render('Visualization', True, WHITE)
                     g.display.blit(title,
                                    (sx + sub_w // 2 - title.get_width() // 2,
                                     sy + 8))
-                    pygame.draw.rect(
-                        g.display,
-                        (100, 180, 100) if headless else (150, 150, 150),
-                        btn_headless)
-                    pygame.draw.rect(
-                        g.display,
-                        (100, 180, 100) if not headless else (150, 150, 150),
-                        btn_live)
-                    g.display.blit(g.font.render('Headless', True, BLACK),
-                                   (btn_headless.x + 12, btn_headless.y + 8))
-                    g.display.blit(g.font.render('Live (demo)', True, BLACK),
-                                   (btn_live.x + 12, btn_live.y + 8))
-
-                    eval_ok = not headless
-                    ebg = ((100, 180, 100) if (eval_only and eval_ok)
-                           else (150, 150, 150))
-                    if not eval_ok:
-                        ebg = (120, 120, 120)
-                    pygame.draw.rect(g.display, ebg, btn_eval)
-                    elbl = g._fit_text(
-                        f'Eval only (no learning): '
-                        f'{"ON" if eval_only else "OFF"}',
-                        g.font, btn_eval.width - 16)
-                    g.display.blit(g.font.render(elbl, True, BLACK),
-                                   (btn_eval.x + 8, btn_eval.y + 8))
-
-                    # Resume training toggle
-                    has_ckpt = bool(g.current_checkpoint_path)
-                    rbg = ((100, 180, 100) if resume_training and has_ckpt
-                           else (150, 150, 150))
-                    if not has_ckpt:
-                        rbg = (120, 120, 120)
-                    pygame.draw.rect(g.display, rbg, btn_resume)
-                    rlbl = g._fit_text(
-                        f'Resume from checkpoint: '
-                        f'{"ON" if resume_training and has_ckpt else "OFF"}',
-                        g.font, btn_resume.width - 16)
-                    g.display.blit(g.font.render(rlbl, True, BLACK),
-                                   (btn_resume.x + 8, btn_resume.y + 8))
-
-                    # Episodes input
-                    ep_label = status_font.render('Episodes:', True, WHITE)
-                    g.display.blit(ep_label, (sx + 20, sy + 208))
-                    ep_border = (255, 220, 50) if active_input == 'episodes' else (150, 150, 150)
-                    pygame.draw.rect(g.display, (40, 40, 40), inp_ep_rect)
-                    pygame.draw.rect(g.display, ep_border, inp_ep_rect, 2)
-                    ep_txt = status_font.render(train_episodes_str, True, WHITE)
-                    g.display.blit(ep_txt, (inp_ep_rect.x + 6, inp_ep_rect.y + 6))
-                    if active_input == 'episodes' and show_cursor:
-                        _cx = inp_ep_rect.x + 6 + status_font.size(train_episodes_str[:ep_cursor])[0]
-                        pygame.draw.line(g.display, WHITE,
-                                         (_cx, inp_ep_rect.y + 4),
-                                         (_cx, inp_ep_rect.bottom - 4))
 
                     # Board size input
                     bs_label = status_font.render('Board size:', True, WHITE)
-                    g.display.blit(bs_label, (sx + 20, sy + 278))
+                    g.display.blit(bs_label, (sx + 20, sy + 60))
                     bs_border = (255, 220, 50) if active_input == 'boardsize' else (150, 150, 150)
                     pygame.draw.rect(g.display, (40, 40, 40), inp_bs_rect)
                     pygame.draw.rect(g.display, bs_border, inp_bs_rect, 2)
@@ -1541,33 +1295,18 @@ if __name__ == '__main__':
                                          (_cx, inp_bs_rect.y + 4),
                                          (_cx, inp_bs_rect.bottom - 4))
 
-                    # Model name input
-                    mn_label = status_font.render('Model filename:', True, WHITE)
-                    g.display.blit(mn_label, (sx + 20, sy + 348))
-                    mn_border = (255, 220, 50) if active_input == 'model' else (150, 150, 150)
-                    pygame.draw.rect(g.display, (40, 40, 40), inp_mn_rect)
-                    pygame.draw.rect(g.display, mn_border, inp_mn_rect, 2)
-                    mn_txt = status_font.render(
-                        g._fit_text(train_model_name, status_font, inp_mn_rect.width - 12),
-                        True, WHITE)
-                    g.display.blit(mn_txt, (inp_mn_rect.x + 6, inp_mn_rect.y + 6))
-                    if active_input == 'model' and show_cursor:
-                        _vn = train_model_name[:mn_cursor]
-                        _cx = inp_mn_rect.x + 6 + status_font.size(_vn)[0]
-                        pygame.draw.line(g.display, WHITE,
-                                         (_cx, inp_mn_rect.y + 4),
-                                         (_cx, inp_mn_rect.bottom - 4))
-
                     # Status lines
-                    line1 = 'Algorithm: Double DQN with PER'
+                    level_status = (f'Level: {g.current_level_name}'
+                                    if g.current_level_name
+                                    else 'Level: empty map (classic snake)')
                     ckpt_status = (f'Checkpoint: {os.path.basename(g.current_checkpoint_path)}'
                                    if g.current_checkpoint_path else 'No checkpoint loaded')
-                    for i, ln in enumerate([line1, ckpt_status]):
+                    info_y = sy + 130
+                    for ln in [level_status, ckpt_status]:
                         cl = g._fit_text(ln, status_font, sub_w - 24)
                         sf = status_font.render(cl, True, WHITE)
-                        g.display.blit(
-                            sf, (sx + 12,
-                                 sy + 415 + i * (status_font.get_height() + 4)))
+                        g.display.blit(sf, (sx + 12, info_y))
+                        info_y += status_font.get_height() + 4
 
                     pygame.draw.rect(g.display, (80, 200, 120), btn_start)
                     pygame.draw.rect(g.display, (200, 80, 80), btn_back)

@@ -18,7 +18,7 @@ import time
 from game import SnakeGameAI
 
 
-def run_single(params, episodes, max_steps, level_path, board_size, log_dir):
+def run_single(params, episodes, max_steps, level_path, board_size):
     from dqn_agent import DQNAgent
 
     env = SnakeGameAI(render=False, board_blocks=board_size)
@@ -61,6 +61,7 @@ def run_single(params, episodes, max_steps, level_path, board_size, log_dir):
         scores.append(env.score)
         if env.score > best_score:
             best_score = env.score
+        agent.decay_epsilon()
 
     elapsed = time.time() - t0
     avg_last50 = sum(scores[-50:]) / min(50, len(scores)) if scores else 0
@@ -100,7 +101,7 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
         print(f'[{i + 1}/{len(combos)}] {label}')
 
         result = run_single(params, episodes, max_steps, level_path,
-                            board_size, log_dir)
+                            board_size)
 
         with open(results_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)

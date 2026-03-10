@@ -72,13 +72,13 @@ class PrioritizedReplayBuffer:
     def _get_priority(self, error):
         return (np.abs(error) + self.PER_E) ** self.PER_A
 
-    def push(self, state, action, reward, next_state, done):
+    def push(self, state, action, reward, next_state, done, steps=1):
         s = np.asarray(state, dtype=np.float32).copy()
         ns = np.asarray(next_state, dtype=np.float32).copy()
         max_p = np.max(self.tree.tree[-self.tree.capacity:])
         if max_p == 0:
             max_p = 1.0
-        self.tree.add(max_p, (s, int(action), float(reward), ns, bool(done)))
+        self.tree.add(max_p, (s, int(action), float(reward), ns, bool(done), int(steps)))
 
     def sample(self, batch_size):
         batch, indices, priorities = [], [], []
@@ -106,7 +106,7 @@ class PrioritizedReplayBuffer:
         if not batch:
             return None
 
-        s, a, r, ns, d = zip(*batch)
+        s, a, r, ns, d, steps = zip(*batch)
         probs = np.array(priorities, dtype=np.float64) / (self.tree.total() + 1e-8)
         weights = (self.tree.size * probs + 1e-8) ** (-beta)
         weights /= weights.max()
@@ -117,6 +117,7 @@ class PrioritizedReplayBuffer:
             np.array(r, dtype=np.float32),
             np.array(ns, dtype=np.float32),
             np.array(d, dtype=np.uint8),
+            np.array(steps, dtype=np.int32),
             np.array(indices, dtype=np.int64),
             np.array(weights, dtype=np.float32),
         )
@@ -225,7 +226,7 @@ class DQNAgent:
         self.steps = 0
         self.eps = 1.0
         self.eps_min = 0.01
-        self.eps_decay = 0.9999
+        self.eps_decay = 0.9997
         self._nstep_buffers = {}  # env_id -> NStepBuffer
 
     def act(self, state):
@@ -255,27 +256,26 @@ class DQNAgent:
         actions = np.where(explore_mask, random_actions, greedy_actions)
         return actions
 
-    def push(self, env_id, state, action, reward, next_state, done):
+    def push(self, env_id, state, action, reward, next_state, done, snake_length=None):
         """Push a transition through the n-step buffer for env_id."""
         if env_id not in self._nstep_buffers:
             self._nstep_buffers[env_id] = NStepBuffer(self.n_step, self.gamma)
+        # Dynamic n-step: short snake → small n (fast learning), long snake → large n (better planning)
+        if snake_length is not None:
+            self._nstep_buffers[env_id].n = max(3, min(self.n_step, snake_length))
         transitions = self._nstep_buffers[env_id].push(state, action, reward, next_state, done)
         for s0, a0, R, s_n, d_n, steps_used in transitions:
-            self.replay.push(s0, a0, R, s_n, d_n)
+            self.replay.push(s0, a0, R, s_n, d_n, steps_used)
 
-    def reset_nstep(self, env_id):
-        """Reset n-step buffer for an environment (on episode boundary)."""
-        if env_id in self._nstep_buffers:
-            self._nstep_buffers[env_id].reset()
 
     def update(self):
         if len(self.replay) < self.batch_size:
-            return
+            return None, None
         sample = self.replay.sample(self.batch_size)
         if sample is None:
-            return
+            return None, None
 
-        s, a, r, ns, d, indices, weights = sample
+        s, a, r, ns, d, steps, indices, weights = sample
         dev = self.device
         s_t = torch.as_tensor(s, dtype=torch.float32).to(dev)
         a_t = torch.as_tensor(a, dtype=torch.int64).unsqueeze(1).to(dev)
@@ -283,14 +283,15 @@ class DQNAgent:
         ns_t = torch.as_tensor(ns, dtype=torch.float32).to(dev)
         d_t = torch.as_tensor(d, dtype=torch.float32).unsqueeze(1).to(dev)
         w_t = torch.as_tensor(weights, dtype=torch.float32).unsqueeze(1).to(dev)
+        steps_t = torch.as_tensor(steps, dtype=torch.float32).unsqueeze(1).to(dev)
 
         q_values = self.policy_net(s_t).gather(1, a_t)
 
-        # Double DQN with n-step discount
+        # Double DQN with per-transition n-step discount
         with torch.no_grad():
             best_actions = self.policy_net(ns_t).argmax(1, keepdim=True)
             next_q = self.target_net(ns_t).gather(1, best_actions)
-            gamma_n = self.gamma ** self.n_step
+            gamma_n = self.gamma ** steps_t
             target = r_t + gamma_n * next_q * (1.0 - d_t)
 
         td_errors = (q_values - target).detach().cpu().squeeze(1).numpy()
@@ -304,6 +305,8 @@ class DQNAgent:
 
         self.replay.update_priorities(indices, td_errors)
         self._soft_update()
+
+        return loss.item(), q_values.detach().mean().item()
 
     def decay_epsilon(self):
         """Call once per round from training loop (not per gradient update)."""

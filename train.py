@@ -11,7 +11,6 @@ Usage:
 """
 
 import argparse
-import csv
 import datetime
 import json
 import os
@@ -107,17 +106,21 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         pass
 
     print(f'Training {episodes} episodes | board={board_size} | '
-          f'envs={num_envs} | updates/round={max(1, num_envs // 8)} | logs -> {log_dir}')
+          f'envs={num_envs} | updates/round={max(1, num_envs // 16)} | logs -> {log_dir}')
 
     best_score = 0
     best_avg50 = 0.0
     best_ckpt_path = os.path.join(log_dir, 'best.pth')
     stagnation_counter = 0
-    STAGNATION_THRESHOLD = 3000  # episodes without avg50 improvement before rollback
-    updates_per_round = max(1, num_envs // 8)  # e.g. 64 envs → 8 updates/round
+    STAGNATION_THRESHOLD = 15000  # episodes without meaningful improvement before rollback
+    STAGNATION_TOLERANCE = 0.9   # tolerate avg50 down to 90% of best before counting as stagnation
+    ROLLBACK_EPS_THRESHOLD = 0.3  # don't rollback while still exploring (eps >= 0.3)
+    updates_per_round = max(1, num_envs // 16)  # e.g. 128 envs → 8 updates/round
     t_start = time.time()
     recent_scores = []
     recent_rewards = []
+    recent_losses = []
+    recent_qvals = []
 
     # -- parallel episode loop ------------------------------------------
     # Each env runs its own episode concurrently; we round-robin step them.
@@ -136,7 +139,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 break
             action = int(actions[i])
             next_state, reward, done, info = env.play_step(action, skip_events=True)
-            agent.push(i, states[i], action, reward, next_state, done)
+            agent.push(i, states[i], action, reward, next_state, done,
+                       snake_length=len(env.snake))
             rewards_acc[i] += reward
             steps_acc[i] += 1
             states[i] = next_state
@@ -159,11 +163,16 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                         best_avg50 = avg50
                         stagnation_counter = 0
                         agent.save(best_ckpt_path)
+                    elif avg50 >= best_avg50 * STAGNATION_TOLERANCE:
+                        # Within tolerance band — don't count as stagnation
+                        pass
                     else:
                         stagnation_counter += 1
 
                     # Rollback to best checkpoint on prolonged stagnation
-                    if stagnation_counter >= STAGNATION_THRESHOLD and os.path.isfile(best_ckpt_path):
+                    if (stagnation_counter >= STAGNATION_THRESHOLD
+                            and agent.eps < ROLLBACK_EPS_THRESHOLD
+                            and os.path.isfile(best_ckpt_path)):
                         old_eps = agent.eps
                         agent.load(best_ckpt_path)
                         agent.eps = old_eps  # keep current exploration rate
@@ -178,14 +187,20 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                     np.savez_compressed(log_path,
                         scores=np.array(all_scores, dtype=np.int16),
                         rewards=np.array(all_rewards, dtype=np.float16),
-                        steps=np.array(all_steps, dtype=np.uint16))
+                        steps=np.array(all_steps, dtype=np.uint16),
+                        losses=np.array(recent_losses, dtype=np.float32),
+                        qvals=np.array(recent_qvals, dtype=np.float32))
 
-                if ep_counter % 50 == 0 or ep_counter == 1:
+                if ep_counter % 1000 == 0 or ep_counter == 1:
                     elapsed = time.time() - t_start
                     lr = agent.optimizer.param_groups[0]['lr']
+                    avgSteps = sum(all_steps[-50:]) / max(1, len(all_steps[-50:]))
+                    avg_loss = sum(recent_losses[-200:]) / max(1, len(recent_losses[-200:])) if recent_losses else 0.0
+                    avg_q = sum(recent_qvals[-200:]) / max(1, len(recent_qvals[-200:])) if recent_qvals else 0.0
                     print(f'ep {ep_counter}/{episodes} | '
                           f'best={best_score} avg50={avg50:.1f} '
-                          f'avgR50={avgR50:.1f} '
+                          f'avgR50={avgR50:.1f} avgSteps={avgSteps:.0f} | '
+                          f'loss={avg_loss:.4f} Q={avg_q:.2f} | '
                           f'eps={agent.eps:.4f} lr={lr:.1e} '
                           f'elapsed={elapsed:.0f}s')
                     agent.step_scheduler(avg50)
@@ -200,14 +215,19 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
         # Multiple gradient updates per round to compensate for many envs
         for _ in range(updates_per_round):
-            agent.update()
+            loss_val, q_val = agent.update()
+            if loss_val is not None:
+                recent_losses.append(loss_val)
+                recent_qvals.append(q_val)
         agent.decay_epsilon()  # once per round, not per gradient update
 
     # -- save final models ----------------------------------------------
     np.savez_compressed(log_path,
         scores=np.array(all_scores, dtype=np.int16),
         rewards=np.array(all_rewards, dtype=np.float16),
-        steps=np.array(all_steps, dtype=np.uint16))
+        steps=np.array(all_steps, dtype=np.uint16),
+        losses=np.array(recent_losses, dtype=np.float32),
+        qvals=np.array(recent_qvals, dtype=np.float32))
     agent.save(os.path.join(log_dir, save_path))
     agent.save(save_path)
     print(f'Done. Best score: {best_score}. Model saved to {save_path}')
@@ -227,13 +247,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Snake DQN agent (headless)')
     parser.add_argument('--episodes', type=int, default=1000)
     parser.add_argument('--max-steps', type=int, default=15000)
-    parser.add_argument('--save-every', type=int, default=3000)
+    parser.add_argument('--save-every', type=int, default=10000)
     parser.add_argument('--level', type=str, default=None, help='Path to level JSON')
     parser.add_argument('--init-checkpoint', type=str, default=None, help='Path to .pth to resume')
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')
     parser.add_argument('--save', type=str, default='model.pth', help='Final model filename')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
-    parser.add_argument('--num-envs', type=int, default=1, help='Parallel environments (e.g. 4-8)')
+    parser.add_argument('--num-envs', type=int, default=128, help='Parallel environments (e.g. 64-128)')
     parser.add_argument('--agent', type=str, default='dqn', choices=['dqn', 'cnn'],
                         help='Agent type: dqn (feature vector) or cnn (grid observation)')
     parser.add_argument('--simple-rewards', action='store_true',
