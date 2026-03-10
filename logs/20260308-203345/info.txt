@@ -1,0 +1,7 @@
+level_path: None
+init_checkpoint: None
+episodes: 1000
+max_steps: 15000
+board_size: 20
+num_envs: 16
+started: 20260308-203345

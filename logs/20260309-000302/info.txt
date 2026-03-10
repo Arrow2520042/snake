@@ -1,0 +1,7 @@
+level_path: None
+init_checkpoint: test_mapaD_e4.pth
+episodes: 2000
+max_steps: 15000
+board_size: 20
+num_envs: 16
+started: 20260309-000302

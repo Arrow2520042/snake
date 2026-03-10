@@ -23,14 +23,20 @@ def update_ui(self):
     by = self.board_y
     disp.fill(black)
 
-    # Draw snake (cell coords → pixel)
-    for cell in self.snake:
+    # Draw snake (cell coords → pixel) — head is green
+    head_outer = (0, 160, 0)
+    head_inner = (0, 220, 0)
+    for i, cell in enumerate(self.snake):
         px = bx + cell[0] * bs
         py = by + cell[1] * bs
         r_outer = pygame.Rect(px, py, bs, bs)
         r_inner = pygame.Rect(px + 4, py + 4, bs - 8, bs - 8)
-        pygame.draw.rect(disp, blue1, r_outer)
-        pygame.draw.rect(disp, blue2, r_inner)
+        if i == 0:
+            pygame.draw.rect(disp, head_outer, r_outer)
+            pygame.draw.rect(disp, head_inner, r_inner)
+        else:
+            pygame.draw.rect(disp, blue1, r_outer)
+            pygame.draw.rect(disp, blue2, r_inner)
 
     # Draw food
     if self.food:

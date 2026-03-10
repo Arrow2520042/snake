@@ -1,46 +1,64 @@
 """Headless training script for Snake DQN agent.
 
+Supports N parallel environments (single-threaded, round-robin stepping)
+for higher throughput on multi-core CPUs.
+
 Usage:
     python train.py --episodes 1000
     python train.py --level levels/mymap.json --board-size 20
     python train.py --init-checkpoint model.pth --episodes 500
+    python train.py --num-envs 8 --episodes 2000
 """
 
 import argparse
-import copy
 import csv
 import datetime
 import json
 import os
 import time
 
+import torch
 from game import SnakeGameAI
+
+
+def _load_walls(level_path, board_blocks):
+    """Load wall set from a level JSON file."""
+    with open(level_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    walls = set()
+    for item in data:
+        cx, cy = int(item[0]), int(item[1])
+        if 0 <= cx < board_blocks and 0 <= cy < board_blocks:
+            walls.add((cx, cy))
+    return walls
 
 
 def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           init_checkpoint=None, log_name=None, save_path='model.pth',
-          board_size=20):
+          board_size=20, num_envs=1, fresh=False):
     from dqn_agent import DQNAgent
 
-    env = SnakeGameAI(render=False, board_blocks=board_size)
-
-    # Load level walls
+    walls = None
     if level_path and os.path.isfile(level_path):
-        with open(level_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        walls = set()
-        for item in data:
-            cx, cy = int(item[0]), int(item[1])
-            if 0 <= cx < env.board_blocks and 0 <= cy < env.board_blocks:
-                walls.add((cx, cy))
-        env.walls = walls
+        walls = _load_walls(level_path, board_size)
         print(f'Loaded level: {level_path} ({len(walls)} walls)')
+
+    # Create parallel environments
+    envs = []
+    for _ in range(num_envs):
+        env = SnakeGameAI(render=False, board_blocks=board_size)
+        if walls:
+            env.walls = walls
+        envs.append(env)
 
     agent = DQNAgent()
 
     if init_checkpoint and os.path.isfile(init_checkpoint):
-        agent.load(init_checkpoint)
-        print(f'Loaded checkpoint: {init_checkpoint}')
+        agent.load(init_checkpoint, weights_only=fresh)
+        if fresh:
+            print(f'Loaded weights only: {init_checkpoint} (fresh training state: eps={agent.eps:.4f})')
+        else:
+            print(f'Loaded checkpoint: {init_checkpoint} (eps={agent.eps:.4f}, steps={agent.steps})')
 
     # Logging setup
     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -63,65 +81,81 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'episodes: {episodes}\n')
             fi.write(f'max_steps: {max_steps}\n')
             fi.write(f'board_size: {board_size}\n')
+            fi.write(f'num_envs: {num_envs}\n')
             fi.write(f'started: {ts}\n')
     except Exception:
         pass
 
     print(f'Training {episodes} episodes | board={board_size} | '
-          f'logs -> {log_dir}')
+          f'envs={num_envs} | logs -> {log_dir}')
 
     best_score = 0
-    best_state_dict = None
     t_start = time.time()
     recent_scores = []
+    recent_rewards = []
 
-    for ep in range(1, episodes + 1):
-        state = env.reset()
-        total_reward = 0.0
-        ep_steps = 0
+    # -- parallel episode loop ------------------------------------------
+    # Each env runs its own episode concurrently; we round-robin step them.
+    states = [env.reset() for env in envs]
+    rewards_acc = [0.0] * num_envs
+    steps_acc = [0] * num_envs
+    ep_counter = 0  # total finished episodes
 
-        for t in range(max_steps):
-            action = agent.act(state)
-            next_state, reward, done, info = env.play_step(action, skip_events=True)
-            agent.push(state, action, reward, next_state, done)
-            agent.update()
-            total_reward += reward
-            state = next_state
-            ep_steps += 1
-            if done:
+    while ep_counter < episodes:
+        # Step all envs
+        for i, env in enumerate(envs):
+            if ep_counter >= episodes:
                 break
+            action = agent.act(states[i])
+            next_state, reward, done, info = env.play_step(action, skip_events=True)
+            agent.push(states[i], action, reward, next_state, done)
+            rewards_acc[i] += reward
+            steps_acc[i] += 1
+            states[i] = next_state
 
-        score = env.score
-        recent_scores.append(score)
-        avg50 = sum(recent_scores[-50:]) / len(recent_scores[-50:])
-        if score > best_score:
-            best_score = score
-            best_state_dict = copy.deepcopy(agent.policy_net.state_dict())
+            if done or steps_acc[i] >= max_steps:
+                ep_counter += 1
+                score = env.score
+                ep_reward = rewards_acc[i]
+                recent_scores.append(score)
+                recent_rewards.append(ep_reward)
+                avg50 = sum(recent_scores[-50:]) / len(recent_scores[-50:])
+                avgR50 = sum(recent_rewards[-50:]) / len(recent_rewards[-50:])
 
-        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                ep, f'{avg50:.2f}', f'{total_reward:.2f}', ep_steps,
-                f'{agent.eps:.4f}',
-                datetime.datetime.now().strftime('%Y%m%d-%H%M%S'),
-            ])
+                if score > best_score:
+                    best_score = score
 
-        if ep % 50 == 0 or ep == 1:
-            elapsed = time.time() - t_start
-            print(f'ep {ep}/{episodes} | score={score} best={best_score} '
-                  f'reward={total_reward:.1f} eps={agent.eps:.4f} '
-                  f'elapsed={elapsed:.0f}s')
+                with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                    csv.writer(f).writerow([
+                        ep_counter, score, f'{ep_reward:.2f}',
+                        steps_acc[i], f'{agent.eps:.4f}',
+                        datetime.datetime.now().strftime('%Y%m%d-%H%M%S'),
+                    ])
 
-        if ep % save_every == 0:
-            ckpt = os.path.join(log_dir, f'model_ep{ep}.pth')
-            agent.save(ckpt)
+                if ep_counter % 50 == 0 or ep_counter == 1:
+                    elapsed = time.time() - t_start
+                    lr = agent.optimizer.param_groups[0]['lr']
+                    print(f'ep {ep_counter}/{episodes} | '
+                          f'best={best_score} avg50={avg50:.1f} '
+                          f'avgR50={avgR50:.1f} '
+                          f'eps={agent.eps:.4f} lr={lr:.1e} '
+                          f'elapsed={elapsed:.0f}s')
+                    agent.step_scheduler(avg50)
 
+                if ep_counter % save_every == 0:
+                    agent.save(os.path.join(log_dir, f'model_ep{ep_counter}.pth'))
+
+                # Reset this env for next episode
+                states[i] = env.reset()
+                rewards_acc[i] = 0.0
+                steps_acc[i] = 0
+
+        # One shared update per round (after stepping all envs)
+        agent.update()
+
+    # -- save final models ----------------------------------------------
     agent.save(os.path.join(log_dir, save_path))
     agent.save(save_path)
-    if best_state_dict is not None:
-        import torch as _torch
-        _torch.save(best_state_dict, os.path.join(log_dir, 'best.pth'))
-        _torch.save(best_state_dict, 'best.pth')
     print(f'Done. Best score: {best_score}. Model saved to {save_path}')
 
     try:
@@ -144,6 +178,9 @@ if __name__ == '__main__':
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')
     parser.add_argument('--save', type=str, default='model.pth', help='Final model filename')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
+    parser.add_argument('--num-envs', type=int, default=1, help='Parallel environments (e.g. 4-8)')
+    parser.add_argument('--fresh', action='store_true',
+                        help='Load weights only, reset training state (eps, optimizer, steps)')
     args = parser.parse_args()
 
     train(
@@ -155,4 +192,6 @@ if __name__ == '__main__':
         log_name=args.log_name,
         save_path=args.save,
         board_size=args.board_size,
+        num_envs=args.num_envs,
+        fresh=args.fresh,
     )

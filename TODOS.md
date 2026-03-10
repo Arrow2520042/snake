@@ -19,20 +19,55 @@
 - [x] Fixed `choose_action_with_debug` dead code bug
 - [x] Cleaned up unnecessary try/except pass blocks
 
+## Completed (v3 improvements)
+
+- [x] Parallel vectorized environments (N envs round-robin) in train.py
+- [x] Checkpoint save/load with full training state (eps, optimizer, steps, target_net)
+- [x] Periodic checkpoint saves every N episodes (configurable `--save-every`)
+- [x] Save checkpoint metadata (eps, level, date) alongside .pth + run_info.txt
+- [x] Snake head green color for visibility
+- [x] Anti-loop improvements: hunger timer, per-food timeout, deque 16→32
+- [x] Freeze-on-death/win screen with Resume/Stop buttons
+- [x] Stop button in live training
+- [x] Mid-episode pause with step-through
+- [x] Max score display accounting for walls (`Score: X/MAX`)
+- [x] Resume training toggle (ON/OFF) in Train on Level submenu
+- [x] Cursor-based text input (arrow keys, Home/End, Delete) in submenu & level designer
+- [x] food_timeout end-of-episode label in live demo
+- [x] Removed classic snake / manual play mode
+- [x] `--num-envs 8` default in headless GUI training subprocess
+
+## Completed (v4 reward fixes)
+
+- [x] Food reward always positive (was -5 for tight spaces → now min +2)
+- [x] Reduced space-awareness penalty (removed body_ratio scaling, capped at -0.3)
+- [x] Slower epsilon decay (0.9995 → 0.9999) for more exploration with parallel envs
+- [x] Cached flood_fill in play_step, reused in get_state (saves 1 BFS/step)
+- [x] Tail-chase Manhattan distance feature added (state_dim 22→23)
+
 ## Breaking changes
 
 - Old `.pth` checkpoints are incompatible (state_dim 9→18, hidden 128→256)
 - `Point` namedtuple removed from game logic (now uses plain tuples)
 - `resize_window` no longer takes `preserve_state` parameter
 - `rl_agent.py` (tabular) deleted
+- v4 reward changes: retrain or use `--fresh` with existing weights
+- v4 state_dim 22→23: all old checkpoints incompatible
 
 ## Remaining roadmap
 
-- [ ] Extract `live_trainer.py` from `game.py` __main__ block
-- [ ] Add training metrics panel: avg reward/N episodes, episode length, win-rate
-- [ ] Save checkpoint metadata (eps, gamma, level, date) alongside `.pth`
-- [ ] Add unit tests: collision, state encoding, action mapping, level load/save
-- [ ] Add seed support and deterministic mode for reproducible experiments
-- [ ] Add FPS/step profiler and DQN benchmark
+### High priority (training quality)
+- [x] LR scheduling (ReduceLROnPlateau after score stagnation)
+- [ ] Add Dueling DQN architecture option (better value/advantage separation)
+- [x] Add training graphs (matplotlib plots via analyze_logs.py --plot)
+
+### Medium priority (tooling & experiments)
 - [ ] Implement curriculum learning scheduler (auto board-size progression)
-- [ ] Add Dueling DQN architecture option
+- [ ] Add seed support and deterministic mode for reproducible experiments
+- [ ] Implement CNN agent training pipeline (full-board vision alternative)
+- [x] Add training metrics panel: avg reward/N episodes, episode length, win-rate
+
+### Low priority (code quality)
+- [ ] Extract `live_trainer.py` from `game.py` __main__ block
+- [ ] Add unit tests: collision, state encoding, action mapping, level load/save
+- [ ] Add FPS/step profiler and DQN benchmark

@@ -1,5 +1,0 @@
-timestamp: 20260308-033349
-level: test1_20260308-033047
-save_path: v1.pth
-device: cpu
-episodes: 600

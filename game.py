@@ -37,6 +37,11 @@ DIR_VECTORS = {
     Direction.DOWN: (0, 1),
 }
 
+_CW = (Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP)
+_CW_IDX = {d: i for i, d in enumerate(_CW)}
+_DIR_DX = {Direction.RIGHT: 1, Direction.LEFT: -1, Direction.UP: 0, Direction.DOWN: 0}
+_DIR_DY = {Direction.RIGHT: 0, Direction.LEFT: 0, Direction.UP: -1, Direction.DOWN: 1}
+
 # Colours
 WHITE = (255, 255, 255)
 RED = (200, 0, 0)
@@ -149,7 +154,9 @@ class SnakeGameAI:
         self.no_food_slots = False
         self._place_food()
         self.frame_iteration = 0
-        self._recent_positions = deque(maxlen=16)
+        self._steps_since_food = 0
+        self._recent_positions = deque(maxlen=64)
+        self._recent_set = set()
         self._prev_food_dist = self._manhattan_to_food()
         return self.get_state()
 
@@ -202,13 +209,18 @@ class SnakeGameAI:
             return self.get_state(), 0, True, {
                 "score": self.score, "board_filled": True, "reason": "no_food_slots"}
 
-        act_idx = self._parse_action(action)
+        act_idx = action if isinstance(action, int) and 0 <= action <= 2 else self._parse_action(action)
         self._move(act_idx)
+
+        # Incremental body set: old head becomes body, add to set
+        old_head = self.snake[0] if self.snake else None
         self.snake.insert(0, self.head)
-        self.snake_body_set = set(self.snake[1:])
+        if old_head is not None:
+            self.snake_body_set.add(old_head)
 
         reward = -0.01
         done = False
+        self._steps_since_food += 1
 
         if self.is_collision():
             done = True
@@ -220,27 +232,59 @@ class SnakeGameAI:
             reward = -10
             return self.get_state(), reward, done, {"score": self.score, "reason": "max_steps"}
 
-        # Distance-based reward shaping
-        new_food_dist = self._manhattan_to_food()
+        # Per-food timeout: kill episode if snake stalls too long without eating
+        food_timeout = 4 * self.board_blocks * self.board_blocks
+        if self._steps_since_food > food_timeout:
+            done = True
+            reward = -10
+            return self.get_state(), reward, done, {"score": self.score, "reason": "food_timeout"}
+
+        # Distance-based reward shaping (reduced to not punish necessary detours)
+        new_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
 
         if self.head == self.food:
             self.score += 1
-            reward = 10
+            self._steps_since_food = 0
             self._place_food()
-            self._prev_food_dist = self._manhattan_to_food()
+            self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
+            # Scale food reward by post-eat safety (always positive)
+            post_eat_ratio = self._flood_fill_ratio()
+            if post_eat_ratio < 0.15:
+                reward = 2
+            elif post_eat_ratio < 0.3:
+                reward = 5
+            elif post_eat_ratio < 0.5:
+                reward = 8
+            else:
+                reward = 10
         else:
-            self.snake.pop()
-            self.snake_body_set = set(self.snake[1:])
+            tail = self.snake.pop()
+            self.snake_body_set.discard(tail)
             if new_food_dist < self._prev_food_dist:
-                reward += 0.1
+                reward += 0.03
             elif new_food_dist > self._prev_food_dist:
-                reward -= 0.1
+                reward -= 0.03
             self._prev_food_dist = new_food_dist
 
-        # Anti-loop penalty
-        if self.head in self._recent_positions:
+        # Space-awareness penalty: light, no body_ratio scaling
+        reachable_ratio = self._flood_fill_ratio()
+        self._cached_flood = reachable_ratio  # cache for get_state
+        if reachable_ratio < 0.2:
             reward -= 0.3
+        elif reachable_ratio < 0.4:
+            reward -= 0.1
+
+        # Hunger penalty: escalating cost for circling without eating
+        if self._steps_since_food > self.board_blocks * 2:
+            hunger_ratio = self._steps_since_food / food_timeout
+            reward -= 0.1 * hunger_ratio
+
+        # Anti-loop penalty – larger window (64) and scaled by snake length
+        if self.head in self._recent_set:
+            loop_penalty = 0.3 + 0.2 * (len(self.snake) / (self.board_blocks ** 2))
+            reward -= loop_penalty
         self._recent_positions.append(self.head)
+        self._recent_set = set(self._recent_positions)
 
         if self.render:
             self._update_ui()
@@ -279,15 +323,12 @@ class SnakeGameAI:
 
     # -- movement --------------------------------------------------------
     def _move(self, action):
-        clock_wise = [Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP]
-        idx = clock_wise.index(self.direction)
-        if action == 0:
-            new_dir = clock_wise[idx]
-        elif action == 1:
-            new_dir = clock_wise[(idx + 1) % 4]
-        else:
-            new_dir = clock_wise[(idx - 1) % 4]
-        self.direction = new_dir
+        idx = _CW_IDX[self.direction]
+        if action == 1:
+            idx = (idx + 1) & 3
+        elif action == 2:
+            idx = (idx - 1) & 3
+        self.direction = _CW[idx]
         dx, dy = DIR_VECTORS[self.direction]
         self.head = (self.head[0] + dx, self.head[1] + dy)
 
@@ -313,83 +354,136 @@ class SnakeGameAI:
 
     # -- observations ----------------------------------------------------
     def get_state(self):
-        """18-feature vector for the RL agent.
-
-        [danger_s, danger_r, danger_l,
-         dir_up, dir_down, dir_left, dir_right,
-         food_dx, food_dy,
-         wall_dist_s, wall_dist_r, wall_dist_l, wall_dist_b,
-         body_dist_s, body_dist_r, body_dist_l, body_dist_b,
-         snake_length_norm]
-        """
-        head = self.head
+        """22-feature vector for the RL agent."""
+        hx, hy = self.head
         bb = self.board_blocks
+        inv_bb = 1.0 / bb
 
-        cw = [Direction.RIGHT, Direction.DOWN, Direction.LEFT, Direction.UP]
-        idx = cw.index(self.direction)
-        dir_s = cw[idx]
-        dir_r = cw[(idx + 1) % 4]
-        dir_l = cw[(idx - 1) % 4]
-        dir_b = cw[(idx + 2) % 4]
+        idx = _CW_IDX[self.direction]
+        dir_s = _CW[idx]
+        dir_r = _CW[(idx + 1) & 3]
+        dir_l = _CW[(idx - 1) & 3]
+        dir_b = _CW[(idx + 2) & 3]
+        # Check for dangers in each direction
+        # Tail tip is safe (it moves away next step), exclude from blocking
+        tail_tip = self.snake[-1] if len(self.snake) > 1 else None
+        danger_s = int(self._is_blocked_excluding(hx + _DIR_DX[dir_s], hy + _DIR_DY[dir_s], tail_tip))
+        danger_r = int(self._is_blocked_excluding(hx + _DIR_DX[dir_r], hy + _DIR_DY[dir_r], tail_tip))
+        danger_l = int(self._is_blocked_excluding(hx + _DIR_DX[dir_l], hy + _DIR_DY[dir_l], tail_tip))
+        # Food delta is normalized to [-1, 1] range by dividing by board_blocks (max possible distance)
+        food_dx = (self.food[0] - hx) * inv_bb
+        food_dy = (self.food[1] - hy) * inv_bb
 
-        danger_s = int(self.is_collision(self._next_cell(head, dir_s)))
-        danger_r = int(self.is_collision(self._next_cell(head, dir_r)))
-        danger_l = int(self.is_collision(self._next_cell(head, dir_l)))
+        body_set = self.snake_body_set
+        walls = self.walls
 
-        dir_up = int(self.direction == Direction.UP)
-        dir_down = int(self.direction == Direction.DOWN)
-        dir_left = int(self.direction == Direction.LEFT)
-        dir_right = int(self.direction == Direction.RIGHT)
+        def ray_wall(d):
+            dx, dy = DIR_VECTORS[d]
+            cx, cy = hx + dx, hy + dy
+            dist = 1
+            while 0 <= cx < bb and 0 <= cy < bb:
+                if walls and (cx, cy) in walls:
+                    return dist * inv_bb
+                cx += dx; cy += dy; dist += 1
+            return dist * inv_bb
 
-        food_dx = (self.food[0] - head[0]) / bb
-        food_dy = (self.food[1] - head[1]) / bb
+        def ray_body(d):
+            dx, dy = DIR_VECTORS[d]
+            cx, cy = hx + dx, hy + dy
+            dist = 1
+            while 0 <= cx < bb and 0 <= cy < bb:
+                if (cx, cy) in body_set and (cx, cy) != tail_tip:
+                    return dist * inv_bb
+                cx += dx; cy += dy; dist += 1
+            return 1.0
+        # Flood fill ratio: use cached value from play_step if available
+        flood_ratio = getattr(self, '_cached_flood', None)
+        if flood_ratio is None:
+            flood_ratio = self._flood_fill_ratio()
 
-        def ray_wall(direction):
-            dx, dy = DIR_VECTORS[direction]
-            cx, cy = head
-            dist = 0
-            while True:
-                cx += dx
-                cy += dy
-                dist += 1
-                if cx < 0 or cx >= bb or cy < 0 or cy >= bb:
-                    return dist / bb
-                if self.walls and (cx, cy) in self.walls:
-                    return dist / bb
+        # Food safety: simulated flood_fill if snake were 1 longer (ate food)
+        food_safety = self._flood_fill_ratio(extra_block=self.food)
 
-        def ray_body(direction):
-            dx, dy = DIR_VECTORS[direction]
-            cx, cy = head
-            dist = 0
-            while True:
-                cx += dx
-                cy += dy
-                dist += 1
-                if cx < 0 or cx >= bb or cy < 0 or cy >= bb:
-                    return 1.0
-                if (cx, cy) in self.snake_body_set:
-                    return dist / bb
+        # Tail direction (normalised vector from head to tail)
+        tail = self.snake[-1]
+        tail_dx = (tail[0] - hx) * inv_bb
+        tail_dy = (tail[1] - hy) * inv_bb
+        # Tail-chase distance (Manhattan, normalized) – key for long snake survival
+        tail_dist = (abs(tail[0] - hx) + abs(tail[1] - hy)) * inv_bb
 
-        wall_s = ray_wall(dir_s)
-        wall_r = ray_wall(dir_r)
-        wall_l = ray_wall(dir_l)
-        wall_b = ray_wall(dir_b)
-
-        body_s = ray_body(dir_s)
-        body_r = ray_body(dir_r)
-        body_l = ray_body(dir_l)
-        body_b = ray_body(dir_b)
-
-        snake_len = len(self.snake) / (bb * bb)
-
+        # Order: 3 danger, 4 direction, 2 food delta, 4 ray-wall, 4 ray-body,
+        #        1 normalized length, 1 flood_fill, 1 food_safety, 2 tail_dir,
+        #        1 tail_dist = 23
         return [
             danger_s, danger_r, danger_l,
-            dir_up, dir_down, dir_left, dir_right,
+            int(self.direction == Direction.UP),
+            int(self.direction == Direction.DOWN),
+            int(self.direction == Direction.LEFT),
+            int(self.direction == Direction.RIGHT),
             food_dx, food_dy,
-            wall_s, wall_r, wall_l, wall_b,
-            body_s, body_r, body_l, body_b,
-            snake_len,
+            ray_wall(dir_s), ray_wall(dir_r), ray_wall(dir_l), ray_wall(dir_b),
+            ray_body(dir_s), ray_body(dir_r), ray_body(dir_l), ray_body(dir_b),
+            len(self.snake) / (bb * bb),
+            flood_ratio,
+            food_safety,
+            tail_dx, tail_dy,
+            tail_dist,
         ]
+
+    def _is_blocked(self, cx, cy):
+        """Fast inline collision check for a single cell."""
+        if cx < 0 or cx >= self.board_blocks or cy < 0 or cy >= self.board_blocks:
+            return True
+        if (cx, cy) in self.snake_body_set:
+            return True
+        if self.walls and (cx, cy) in self.walls:
+            return True
+        return False
+
+    def _is_blocked_excluding(self, cx, cy, exclude=None):
+        """Collision check that treats *exclude* cell as passable (for tail)."""
+        if cx < 0 or cx >= self.board_blocks or cy < 0 or cy >= self.board_blocks:
+            return True
+        if (cx, cy) in self.snake_body_set and (cx, cy) != exclude:
+            return True
+        if self.walls and (cx, cy) in self.walls:
+            return True
+        return False
+
+    def _flood_fill_ratio(self, extra_block=None):
+        """BFS from head – returns fraction of free cells reachable.
+
+        If *extra_block* is given, treat it as an additional body cell
+        (used to simulate the effect of eating food).
+        """
+        bb = self.board_blocks
+        body_set = self.snake_body_set
+        walls = self.walls
+        visited = set()
+        queue = deque()
+        queue.append(self.head)
+        visited.add(self.head)
+        while queue:
+            cx, cy = queue.popleft()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = cx + dx, cy + dy
+                if (nx, ny) in visited:
+                    continue
+                if nx < 0 or nx >= bb or ny < 0 or ny >= bb:
+                    continue
+                if (nx, ny) in body_set:
+                    continue
+                if extra_block and (nx, ny) == extra_block:
+                    continue
+                if walls and (nx, ny) in walls:
+                    continue
+                visited.add((nx, ny))
+                queue.append((nx, ny))
+        extra_count = 1 if extra_block and extra_block not in body_set else 0
+        total_free = bb * bb - len(body_set) - extra_count - (len(walls) if walls else 0)
+        if total_free <= 0:
+            return 0.0
+        return len(visited) / total_free
 
     def get_grid_state(self):
         """4-channel grid for CNN agent: [head, body, food, walls].
@@ -432,11 +526,10 @@ if __name__ == '__main__':
         btn_w = 360
         btn_h = 64
         center_x = g.w // 2
-        btn1_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 - 150, btn_w, btn_h)
-        btn2_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 - 60, btn_w, btn_h)
-        btn3_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 30, btn_w, btn_h)
-        btn4_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 120, btn_w, btn_h)
-        btn5_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 210, btn_w, btn_h)
+        btn1_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 - 120, btn_w, btn_h)
+        btn2_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 - 30, btn_w, btn_h)
+        btn3_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 60, btn_w, btn_h)
+        btn4_rect = pygame.Rect(center_x - btn_w // 2, g.h // 2 + 150, btn_w, btn_h)
 
         # -- helper: session persistence --------------------------------
         _SESSION_CFG = os.path.join(
@@ -547,7 +640,8 @@ if __name__ == '__main__':
 
         # -- live training loop -----------------------------------------
         def live_train(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES,
-                       init_ckpt=None, eval_only=False, save_path='model.pth'):
+                       init_ckpt=None, eval_only=False, save_path='model.pth',
+                       resume_state=True):
             AgentDQN = None
             try:
                 from dqn_agent import DQNAgent as AgentDQN
@@ -607,7 +701,7 @@ if __name__ == '__main__':
 
             if init_ckpt:
                 try:
-                    agent.load(init_ckpt)
+                    agent.load(init_ckpt, weights_only=not resume_state)
                 except Exception:
                     pass
 
@@ -618,6 +712,8 @@ if __name__ == '__main__':
             _live_save_path = save_path
 
             max_cells = env.board_blocks * env.board_blocks
+            n_walls = len(getattr(env, 'walls', set()))
+            max_score = max_cells - n_walls - 3  # total - walls - initial_snake
             action_names = {0: 'STRAIGHT', 1: 'RIGHT TURN', 2: 'LEFT TURN'}
             recent_scores = []
             recent_steps = []
@@ -690,7 +786,7 @@ if __name__ == '__main__':
                             avg_txt = 'Avg50: n/a'
                         lines = [
                             f'** {reason_text} **',
-                            f'Episode: {ep}  Score: {score}',
+                            f'Episode: {ep}  Score: {score}/{max_score}',
                             f'Reward: {total_reward:.1f}',
                             avg_txt,
                             f'Speed: {env.speed} FPS',
@@ -835,7 +931,7 @@ if __name__ == '__main__':
 
                         lines = [
                             f'Episode: {ep}  Step: {ep_steps}',
-                            f'Score: {env.score}  Reward: {total_reward:.1f}',
+                            f'Score: {env.score}/{max_score}  Reward: {total_reward:.1f}',
                             avg_txt,
                             f'Speed: {env.speed} FPS',
                             run_mode_txt,
@@ -933,6 +1029,8 @@ if __name__ == '__main__':
                             reason_text = 'Snake died (collision)'
                         elif step_info.get('reason') == 'max_steps':
                             reason_text = 'Max steps reached'
+                        elif step_info.get('reason') == 'food_timeout':
+                            reason_text = 'Stalled (food timeout)'
                         else:
                             reason_text = 'Episode ended'
                         # Freeze screen - wait for user to click Resume
@@ -971,21 +1069,18 @@ if __name__ == '__main__':
                         g.resize_window(event.w, event.h)
                         center_x = g.w // 2
                         btn1_rect = pygame.Rect(center_x - btn_w // 2,
-                                                g.h // 2 - 150, btn_w, btn_h)
+                                                g.h // 2 - 120, btn_w, btn_h)
                         btn2_rect = pygame.Rect(center_x - btn_w // 2,
-                                                g.h // 2 - 60, btn_w, btn_h)
+                                                g.h // 2 - 30, btn_w, btn_h)
                         btn3_rect = pygame.Rect(center_x - btn_w // 2,
-                                                g.h // 2 + 30, btn_w, btn_h)
+                                                g.h // 2 + 60, btn_w, btn_h)
                         btn4_rect = pygame.Rect(center_x - btn_w // 2,
-                                                g.h // 2 + 120, btn_w, btn_h)
-                        btn5_rect = pygame.Rect(center_x - btn_w // 2,
-                                                g.h // 2 + 210, btn_w, btn_h)
+                                                g.h // 2 + 150, btn_w, btn_h)
                     if (event.type == pygame.MOUSEBUTTONDOWN
                             and event.button == 1):
                         mx, my = event.pos
                         for tag, rect in [('1', btn1_rect), ('2', btn2_rect),
-                                          ('3', btn3_rect), ('4', btn4_rect),
-                                          ('5', btn5_rect)]:
+                                          ('3', btn3_rect), ('4', btn4_rect)]:
                             if rect.collidepoint(mx, my):
                                 choice = tag
                                 menu_running = False
@@ -994,13 +1089,12 @@ if __name__ == '__main__':
                 g.display.fill(BLACK)
                 title = g.font.render('Snake AI - Menu', True, WHITE)
                 g.display.blit(title, (center_x - title.get_width() // 2,
-                                       g.h // 2 - 180))
+                                       g.h // 2 - 160))
                 for rect, label in [
                     (btn1_rect, 'Level Design'),
-                    (btn2_rect, 'Classic Snake'),
-                    (btn3_rect, 'Train on Level'),
-                    (btn4_rect, 'Load checkpoint (.pth)'),
-                    (btn5_rect, 'Load level (.json)'),
+                    (btn2_rect, 'Train on Level'),
+                    (btn3_rect, 'Load checkpoint (.pth)'),
+                    (btn4_rect, 'Load level (.json)'),
                 ]:
                     pygame.draw.rect(g.display, (50, 50, 50), rect)
                     t = g.font.render(label, True, WHITE)
@@ -1039,94 +1133,7 @@ if __name__ == '__main__':
                 _notif_msg = info_msg
                 _notif_frames = 90
 
-            elif choice == '2':
-                running_demo = True
-                paused = False
-                action_names_demo = {0: 'STRAIGHT', 1: 'RIGHT', 2: 'LEFT'}
-                panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
-                    g._get_left_control_rects(panel_h=220)
-                step = 0
-                last_action_d = None
-                state_d = g.get_state()
-                while running_demo:
-                    panel_bg, btn_pause, btn_plus, btn_minus, btn_stop = \
-                        g._get_left_control_rects(panel_h=220)
-                    for ev in pygame.event.get():
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit(0)
-                        if ev.type == pygame.VIDEORESIZE:
-                            g.resize_window(ev.w, ev.h)
-                        if (ev.type == pygame.KEYDOWN
-                                and ev.key == pygame.K_ESCAPE):
-                            running_demo = False
-                            break
-                        if (ev.type == pygame.MOUSEBUTTONDOWN
-                                and ev.button == 1):
-                            mx, my = ev.pos
-                            if btn_pause.collidepoint(mx, my):
-                                paused = not paused
-                            elif btn_stop.collidepoint(mx, my):
-                                running_demo = False
-                                break
-                            elif btn_plus.collidepoint(mx, my):
-                                g.speed += 10
-                            elif btn_minus.collidepoint(mx, my):
-                                g.speed = max(10, g.speed - 10)
-                    if not paused:
-                        act = random.randint(0, 2)
-                        last_action_d = act
-                        state_d, reward, done, info = g.play_step(act)
-                        step += 1
-                    try:
-                        g._draw_panel_box(panel_bg)
-                        lines = [
-                            f'Step: {step} | Score: {g.score}',
-                            f'Speed: {g.speed} FPS',
-                            f'Move: {action_names_demo.get(last_action_d, "n/a")}',
-                            'Mode: random_policy',
-                        ]
-                        info_font = g.small_font or g.font
-                        lh = info_font.get_height() + 6
-                        for i, ln in enumerate(lines):
-                            cl = g._fit_text(ln, info_font, panel_bg.width - 12)
-                            s = info_font.render(cl, True, WHITE)
-                            g.display.blit(
-                                s, (panel_bg.x + 6, panel_bg.y + 6 + i * lh))
-                        pygame.draw.rect(g.display,
-                                         (180, 180, 100) if paused
-                                         else (100, 180, 100), btn_pause)
-                        pygame.draw.rect(g.display, PANEL_BORDER, btn_pause, 2)
-                        g.display.blit(
-                            g.font.render('Pause' if not paused else 'Resume',
-                                          True, BLACK),
-                            (btn_pause.x + 8, btn_pause.y + 4))
-                        for btn in (btn_plus, btn_minus):
-                            pygame.draw.rect(g.display, (140, 140, 140), btn)
-                            pygame.draw.rect(g.display, PANEL_BORDER, btn, 2)
-                        g.display.blit(g.font.render('+', True, BLACK),
-                                       (btn_plus.x + 10, btn_plus.y + 4))
-                        g.display.blit(g.font.render('-', True, BLACK),
-                                       (btn_minus.x + 12, btn_minus.y + 4))
-                        pygame.draw.rect(g.display, (200, 80, 80), btn_stop)
-                        pygame.draw.rect(g.display, PANEL_BORDER, btn_stop, 2)
-                        g.display.blit(g.font.render('Stop', True, BLACK),
-                                       (btn_stop.x + 8, btn_stop.y + 4))
-                        g._draw_footer_block([
-                            'Esc: menu | Pause/Resume | Stop: end',
-                            'Speed +/-: change FPS',
-                            'Classic mode uses random moves',
-                        ])
-                        pygame.display.flip()
-                    except Exception:
-                        pass
-                    if paused and g.clock:
-                        g.clock.tick(30)
-                    if not paused and done:
-                        running_demo = False
-                g.reset()
-
-            elif choice == '4':
+            elif choice == '3':
                 path = pick_file_dialog(
                     [('PyTorch', '*.pth'), ('All files', '*.*')],
                     fallback_exts=('.pth',), fallback_dirs=('.', 'logs'),
@@ -1140,7 +1147,7 @@ if __name__ == '__main__':
                 _notif_msg = info_msg
                 _notif_frames = 90
 
-            elif choice == '5':
+            elif choice == '4':
                 path = pick_file_dialog(
                     [('JSON level', '*.json'), ('All files', '*.*')],
                     fallback_exts=('.json',), fallback_dirs=('levels', '.'),
@@ -1155,26 +1162,36 @@ if __name__ == '__main__':
                 _notif_msg = info_msg
                 _notif_frames = 90
 
-            elif choice == '3':
-                sub_w = 440
-                sub_h = 420
+            elif choice == '2':
+                sub_w = 460
+                sub_h = 570
                 headless = True
                 eval_only = False
-                train_episodes = 10000
+                resume_training = True
+                train_episodes_str = '10000'
+                ep_cursor = len(train_episodes_str)
                 train_model_name = 'model.pth'
-                active_input = None  # 'episodes' or 'model'
+                mn_cursor = len(train_model_name)
+                board_size_str = str(g.board_blocks)
+                bs_cursor = len(board_size_str)
+                active_input = None
+                blink_timer = 0
                 submenu = True
                 while submenu:
+                    blink_timer = (blink_timer + 1) % 60
+                    show_cursor = blink_timer < 30
                     sx = g.w // 2 - sub_w // 2
                     sy = g.h // 2 - sub_h // 2
                     sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
-                    btn_headless = pygame.Rect(sx + 20, sy + 40, 190, 40)
-                    btn_live = pygame.Rect(sx + 230, sy + 40, 190, 40)
-                    btn_eval = pygame.Rect(sx + 20, sy + 100, 400, 40)
-                    inp_ep_rect = pygame.Rect(sx + 20, sy + 172, 400, 32)
-                    inp_mn_rect = pygame.Rect(sx + 20, sy + 235, 400, 32)
-                    btn_start = pygame.Rect(sx + 20, sy + 330, 190, 50)
-                    btn_back = pygame.Rect(sx + 230, sy + 330, 190, 50)
+                    btn_headless = pygame.Rect(sx + 20, sy + 40, 200, 40)
+                    btn_live = pygame.Rect(sx + 240, sy + 40, 200, 40)
+                    btn_eval = pygame.Rect(sx + 20, sy + 100, 420, 40)
+                    btn_resume = pygame.Rect(sx + 20, sy + 155, 420, 40)
+                    inp_ep_rect = pygame.Rect(sx + 20, sy + 228, 420, 32)
+                    inp_bs_rect = pygame.Rect(sx + 20, sy + 298, 420, 32)
+                    inp_mn_rect = pygame.Rect(sx + 20, sy + 368, 420, 32)
+                    btn_start = pygame.Rect(sx + 20, sy + 470, 200, 50)
+                    btn_back = pygame.Rect(sx + 240, sy + 470, 200, 50)
 
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
@@ -1194,24 +1211,37 @@ if __name__ == '__main__':
                             elif btn_eval.collidepoint(mx, my):
                                 eval_only = not eval_only
                                 active_input = None
+                            elif btn_resume.collidepoint(mx, my):
+                                resume_training = not resume_training
+                                active_input = None
                             elif inp_ep_rect.collidepoint(mx, my):
                                 active_input = 'episodes'
+                                blink_timer = 0
+                            elif inp_bs_rect.collidepoint(mx, my):
+                                active_input = 'boardsize'
+                                blink_timer = 0
                             elif inp_mn_rect.collidepoint(mx, my):
                                 active_input = 'model'
+                                blink_timer = 0
                             elif btn_start.collidepoint(mx, my):
                                 active_input = None
-                                ep_count = max(1, int(train_episodes) if str(train_episodes).isdigit() else 10000)
+                                ep_count = max(1, int(train_episodes_str)) if train_episodes_str.isdigit() else 10000
                                 mname = train_model_name.strip() or 'model.pth'
                                 if not mname.endswith('.pth'):
                                     mname += '.pth'
+                                bsize = max(5, int(board_size_str)) if board_size_str.isdigit() else g.board_blocks
+                                ckpt = g.current_checkpoint_path
                                 cmd = [sys.executable, 'train.py',
                                        '--episodes', str(ep_count),
-                                       '--save', mname]
+                                       '--save', mname,
+                                       '--num-envs', '8',
+                                       '--board-size', str(bsize)]
                                 if g.current_level_path:
                                     cmd += ['--level', g.current_level_path]
-                                if g.current_checkpoint_path:
-                                    cmd += ['--init-checkpoint',
-                                            g.current_checkpoint_path]
+                                if ckpt:
+                                    cmd += ['--init-checkpoint', ckpt]
+                                    if not resume_training:
+                                        cmd += ['--fresh']
                                 if headless:
                                     try:
                                         subprocess.Popen(cmd)
@@ -1220,14 +1250,20 @@ if __name__ == '__main__':
                                         info_msg = f'Failed: {e}'
                                     submenu = False
                                 else:
+                                    # Update board size for live training
+                                    if bsize != g.board_blocks:
+                                        g.board_blocks = bsize
+                                        g.layout_cfg['board_blocks'] = bsize
+                                        g._recompute_layout()
                                     try:
                                         live_train(
                                             g,
                                             max_episodes=ep_count,
                                             max_steps=MAX_EPISODE_MOVES,
-                                            init_ckpt=g.current_checkpoint_path,
+                                            init_ckpt=ckpt,
                                             eval_only=eval_only,
-                                            save_path=mname)
+                                            save_path=mname,
+                                            resume_state=resume_training)
                                         info_msg = 'Live training finished.'
                                     except Exception as e:
                                         info_msg = f'Live training failed: {e}'
@@ -1238,27 +1274,76 @@ if __name__ == '__main__':
                             else:
                                 active_input = None
                         if ev.type == pygame.KEYDOWN and active_input:
+                            blink_timer = 0
                             if ev.key == pygame.K_ESCAPE:
                                 active_input = None
                             elif ev.key == pygame.K_RETURN:
                                 active_input = None
+                            elif ev.key == pygame.K_LEFT:
+                                if active_input == 'episodes':
+                                    ep_cursor = max(0, ep_cursor - 1)
+                                elif active_input == 'boardsize':
+                                    bs_cursor = max(0, bs_cursor - 1)
+                                else:
+                                    mn_cursor = max(0, mn_cursor - 1)
+                            elif ev.key == pygame.K_RIGHT:
+                                if active_input == 'episodes':
+                                    ep_cursor = min(len(train_episodes_str), ep_cursor + 1)
+                                elif active_input == 'boardsize':
+                                    bs_cursor = min(len(board_size_str), bs_cursor + 1)
+                                else:
+                                    mn_cursor = min(len(train_model_name), mn_cursor + 1)
+                            elif ev.key == pygame.K_HOME:
+                                if active_input == 'episodes':
+                                    ep_cursor = 0
+                                elif active_input == 'boardsize':
+                                    bs_cursor = 0
+                                else:
+                                    mn_cursor = 0
+                            elif ev.key == pygame.K_END:
+                                if active_input == 'episodes':
+                                    ep_cursor = len(train_episodes_str)
+                                elif active_input == 'boardsize':
+                                    bs_cursor = len(board_size_str)
+                                else:
+                                    mn_cursor = len(train_model_name)
                             elif ev.key == pygame.K_BACKSPACE:
                                 if active_input == 'episodes':
-                                    train_episodes = str(train_episodes)[:-1] or '0'
+                                    if ep_cursor > 0:
+                                        train_episodes_str = train_episodes_str[:ep_cursor-1] + train_episodes_str[ep_cursor:]
+                                        ep_cursor -= 1
+                                elif active_input == 'boardsize':
+                                    if bs_cursor > 0:
+                                        board_size_str = board_size_str[:bs_cursor-1] + board_size_str[bs_cursor:]
+                                        bs_cursor -= 1
                                 else:
-                                    train_model_name = train_model_name[:-1]
+                                    if mn_cursor > 0:
+                                        train_model_name = train_model_name[:mn_cursor-1] + train_model_name[mn_cursor:]
+                                        mn_cursor -= 1
+                            elif ev.key == pygame.K_DELETE:
+                                if active_input == 'episodes':
+                                    if ep_cursor < len(train_episodes_str):
+                                        train_episodes_str = train_episodes_str[:ep_cursor] + train_episodes_str[ep_cursor+1:]
+                                elif active_input == 'boardsize':
+                                    if bs_cursor < len(board_size_str):
+                                        board_size_str = board_size_str[:bs_cursor] + board_size_str[bs_cursor+1:]
+                                else:
+                                    if mn_cursor < len(train_model_name):
+                                        train_model_name = train_model_name[:mn_cursor] + train_model_name[mn_cursor+1:]
                             else:
                                 ch = ev.unicode
                                 if active_input == 'episodes':
-                                    if ch.isdigit():
-                                        s_ep = str(train_episodes)
-                                        if s_ep == '0':
-                                            s_ep = ''
-                                        s_ep += ch
-                                        train_episodes = int(s_ep) if s_ep else 0
+                                    if ch and ch.isdigit():
+                                        train_episodes_str = train_episodes_str[:ep_cursor] + ch + train_episodes_str[ep_cursor:]
+                                        ep_cursor += 1
+                                elif active_input == 'boardsize':
+                                    if ch and ch.isdigit():
+                                        board_size_str = board_size_str[:bs_cursor] + ch + board_size_str[bs_cursor:]
+                                        bs_cursor += 1
                                 else:
-                                    if ch.isprintable():
-                                        train_model_name += ch
+                                    if ch and ch.isprintable():
+                                        train_model_name = train_model_name[:mn_cursor] + ch + train_model_name[mn_cursor:]
+                                        mn_cursor += 1
 
                     status_font = g.small_font or g.font
                     g.display.fill((20, 20, 20))
@@ -1293,36 +1378,75 @@ if __name__ == '__main__':
                     g.display.blit(g.font.render(elbl, True, BLACK),
                                    (btn_eval.x + 8, btn_eval.y + 8))
 
+                    # Resume training toggle
+                    has_ckpt = bool(g.current_checkpoint_path)
+                    rbg = ((100, 180, 100) if resume_training and has_ckpt
+                           else (150, 150, 150))
+                    if not has_ckpt:
+                        rbg = (120, 120, 120)
+                    pygame.draw.rect(g.display, rbg, btn_resume)
+                    rlbl = g._fit_text(
+                        f'Resume from checkpoint: '
+                        f'{"ON" if resume_training and has_ckpt else "OFF"}',
+                        g.font, btn_resume.width - 16)
+                    g.display.blit(g.font.render(rlbl, True, BLACK),
+                                   (btn_resume.x + 8, btn_resume.y + 8))
+
                     # Episodes input
                     ep_label = status_font.render('Episodes:', True, WHITE)
-                    g.display.blit(ep_label, (sx + 20, sy + 152))
+                    g.display.blit(ep_label, (sx + 20, sy + 208))
                     ep_border = (255, 220, 50) if active_input == 'episodes' else (150, 150, 150)
                     pygame.draw.rect(g.display, (40, 40, 40), inp_ep_rect)
                     pygame.draw.rect(g.display, ep_border, inp_ep_rect, 2)
-                    ep_txt = status_font.render(str(train_episodes), True, WHITE)
+                    ep_txt = status_font.render(train_episodes_str, True, WHITE)
                     g.display.blit(ep_txt, (inp_ep_rect.x + 6, inp_ep_rect.y + 6))
+                    if active_input == 'episodes' and show_cursor:
+                        _cx = inp_ep_rect.x + 6 + status_font.size(train_episodes_str[:ep_cursor])[0]
+                        pygame.draw.line(g.display, WHITE,
+                                         (_cx, inp_ep_rect.y + 4),
+                                         (_cx, inp_ep_rect.bottom - 4))
+
+                    # Board size input
+                    bs_label = status_font.render('Board size:', True, WHITE)
+                    g.display.blit(bs_label, (sx + 20, sy + 278))
+                    bs_border = (255, 220, 50) if active_input == 'boardsize' else (150, 150, 150)
+                    pygame.draw.rect(g.display, (40, 40, 40), inp_bs_rect)
+                    pygame.draw.rect(g.display, bs_border, inp_bs_rect, 2)
+                    bs_txt = status_font.render(board_size_str, True, WHITE)
+                    g.display.blit(bs_txt, (inp_bs_rect.x + 6, inp_bs_rect.y + 6))
+                    if active_input == 'boardsize' and show_cursor:
+                        _cx = inp_bs_rect.x + 6 + status_font.size(board_size_str[:bs_cursor])[0]
+                        pygame.draw.line(g.display, WHITE,
+                                         (_cx, inp_bs_rect.y + 4),
+                                         (_cx, inp_bs_rect.bottom - 4))
 
                     # Model name input
                     mn_label = status_font.render('Model filename:', True, WHITE)
-                    g.display.blit(mn_label, (sx + 20, sy + 215))
+                    g.display.blit(mn_label, (sx + 20, sy + 348))
                     mn_border = (255, 220, 50) if active_input == 'model' else (150, 150, 150)
                     pygame.draw.rect(g.display, (40, 40, 40), inp_mn_rect)
                     pygame.draw.rect(g.display, mn_border, inp_mn_rect, 2)
-                    mn_display = train_model_name + ('|' if active_input == 'model' else '')
                     mn_txt = status_font.render(
-                        g._fit_text(mn_display, status_font, inp_mn_rect.width - 12),
+                        g._fit_text(train_model_name, status_font, inp_mn_rect.width - 12),
                         True, WHITE)
                     g.display.blit(mn_txt, (inp_mn_rect.x + 6, inp_mn_rect.y + 6))
+                    if active_input == 'model' and show_cursor:
+                        _vn = train_model_name[:mn_cursor]
+                        _cx = inp_mn_rect.x + 6 + status_font.size(_vn)[0]
+                        pygame.draw.line(g.display, WHITE,
+                                         (_cx, inp_mn_rect.y + 4),
+                                         (_cx, inp_mn_rect.bottom - 4))
 
                     # Status lines
                     line1 = 'Algorithm: Double DQN with PER'
-                    line2 = 'Eval applies in Live mode only.'
-                    for i, ln in enumerate([line1, line2]):
+                    ckpt_status = (f'Checkpoint: {os.path.basename(g.current_checkpoint_path)}'
+                                   if g.current_checkpoint_path else 'No checkpoint loaded')
+                    for i, ln in enumerate([line1, ckpt_status]):
                         cl = g._fit_text(ln, status_font, sub_w - 24)
                         sf = status_font.render(cl, True, WHITE)
                         g.display.blit(
                             sf, (sx + 12,
-                                 sy + 278 + i * (status_font.get_height() + 4)))
+                                 sy + 415 + i * (status_font.get_height() + 4)))
 
                     pygame.draw.rect(g.display, (80, 200, 120), btn_start)
                     pygame.draw.rect(g.display, (200, 80, 80), btn_back)

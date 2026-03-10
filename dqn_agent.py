@@ -133,7 +133,9 @@ class SimpleNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, output_dim),
+            nn.Linear(hidden, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim),
         )
 
     def forward(self, x):
@@ -142,13 +144,13 @@ class SimpleNet(nn.Module):
 
 class DQNAgent:
     """Double DQN with soft target update and Prioritized Experience Replay.
-    CPU-only.  State vector has 18 features by default.
+    CPU-only.  State vector has 22 features by default.
     """
 
-    STATE_DIM = 18
+    STATE_DIM = 23
 
-    def __init__(self, state_dim=18, n_actions=3, lr=1e-3, gamma=0.99,
-                 batch_size=64, capacity=50_000, tau=0.005, max_grad_norm=1.0):
+    def __init__(self, state_dim=23, n_actions=3, lr=1e-3, gamma=0.99,
+                 batch_size=128, capacity=500_000, tau=0.005, max_grad_norm=1.0):
         self.n_actions = n_actions
         self.gamma = gamma
         self.batch_size = batch_size
@@ -161,11 +163,13 @@ class DQNAgent:
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='max', factor=0.5, patience=3000, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
         self.steps = 0
         self.eps = 1.0
         self.eps_min = 0.01
-        self.eps_decay = 0.9995
+        self.eps_decay = 0.9999
 
     def act(self, state):
         self.steps += 1
@@ -222,10 +226,36 @@ class DQNAgent:
         for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
             tp.data.copy_(self.tau * pp.data + (1.0 - self.tau) * tp.data)
 
-    def save(self, path):
-        torch.save(self.policy_net.state_dict(), path)
+    def step_scheduler(self, metric):
+        """Step the LR scheduler with a score metric (e.g. avg50 score)."""
+        self.scheduler.step(metric)
 
-    def load(self, path):
-        self.policy_net.load_state_dict(torch.load(path, map_location='cpu'))
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+    def save(self, path):
+        torch.save({
+            'policy_net': self.policy_net.state_dict(),
+            'target_net': self.target_net.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'eps': self.eps,
+            'steps': self.steps,
+        }, path)
+
+    def load(self, path, weights_only=False):
+        data = torch.load(path, map_location='cpu')
+        if isinstance(data, dict) and 'policy_net' in data:
+            self.policy_net.load_state_dict(data['policy_net'])
+            self.target_net.load_state_dict(data['target_net'])
+            if not weights_only:
+                if 'optimizer' in data:
+                    self.optimizer.load_state_dict(data['optimizer'])
+                if 'scheduler' in data:
+                    self.scheduler.load_state_dict(data['scheduler'])
+                if 'eps' in data:
+                    self.eps = data['eps']
+                if 'steps' in data:
+                    self.steps = data['steps']
+        else:
+            # Legacy: plain state_dict
+            self.policy_net.load_state_dict(data)
+            self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()

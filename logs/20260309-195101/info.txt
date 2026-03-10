@@ -1,0 +1,7 @@
+level_path: None
+init_checkpoint: v4_b10_e20k.pth
+episodes: 20000
+max_steps: 15000
+board_size: 10
+num_envs: 32
+started: 20260309-195101

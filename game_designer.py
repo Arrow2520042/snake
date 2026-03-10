@@ -33,14 +33,18 @@ def level_designer(self):
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
                     name = ''
+                    name_cursor = 0
                     entering = True
+                    blink_timer = 0
                     input_w = max(280, min(self.left_panel_rect.width - 40, 520))
                     input_rect = pygame.Rect(
                         self.left_panel_rect.x + 20,
-                        self.left_panel_rect.centery - 20,
-                        input_w, 40,
+                        self.left_panel_rect.centery,
+                        input_w, 36,
                     )
                     while entering:
+                        blink_timer = (blink_timer + 1) % 60
+                        show_cursor = blink_timer < 30
                         for ie in pygame.event.get():
                             if ie.type == pygame.QUIT:
                                 pygame.quit()
@@ -52,10 +56,11 @@ def level_designer(self):
                                 input_w = max(280, min(self.left_panel_rect.width - 40, 520))
                                 input_rect = pygame.Rect(
                                     self.left_panel_rect.x + 20,
-                                    self.left_panel_rect.centery - 20,
-                                    input_w, 40,
+                                    self.left_panel_rect.centery,
+                                    input_w, 36,
                                 )
                             if ie.type == pygame.KEYDOWN:
+                                blink_timer = 0
                                 if ie.key == pygame.K_RETURN:
                                     entering = False
                                     break
@@ -63,20 +68,43 @@ def level_designer(self):
                                     entering = False
                                     name = ''
                                     break
-                                if ie.key == pygame.K_BACKSPACE:
-                                    name = name[:-1]
+                                if ie.key == pygame.K_LEFT:
+                                    name_cursor = max(0, name_cursor - 1)
+                                elif ie.key == pygame.K_RIGHT:
+                                    name_cursor = min(len(name), name_cursor + 1)
+                                elif ie.key == pygame.K_HOME:
+                                    name_cursor = 0
+                                elif ie.key == pygame.K_END:
+                                    name_cursor = len(name)
+                                elif ie.key == pygame.K_BACKSPACE:
+                                    if name_cursor > 0:
+                                        name = name[:name_cursor-1] + name[name_cursor:]
+                                        name_cursor -= 1
+                                elif ie.key == pygame.K_DELETE:
+                                    if name_cursor < len(name):
+                                        name = name[:name_cursor] + name[name_cursor+1:]
                                 else:
                                     ch = ie.unicode
                                     if ch and len(name) < 64:
-                                        name += ch
+                                        name = name[:name_cursor] + ch + name[name_cursor:]
+                                        name_cursor += 1
 
+                        _font = self.small_font or self.font
                         self._update_ui()
+                        # Label above input
+                        label_surf = _font.render('Level name (Enter save, Esc cancel):', True, white)
+                        self.display.blit(label_surf, (input_rect.x + 2, input_rect.y - label_surf.get_height() - 4))
+                        # Input box
                         self._draw_panel_box(input_rect)
-                        prompt_raw = 'Level name (Enter save, Esc cancel): ' + name
-                        prompt_line = self._fit_text(prompt_raw, self.small_font or self.font,
-                                                     input_rect.width - 12)
-                        prompt = (self.small_font or self.font).render(prompt_line, True, white)
-                        self.display.blit(prompt, (input_rect.x + 6, input_rect.y + 10))
+                        name_display = self._fit_text(name, _font, input_rect.width - 12)
+                        name_surf = _font.render(name_display, True, white)
+                        self.display.blit(name_surf, (input_rect.x + 6, input_rect.y + 8))
+                        if show_cursor:
+                            _vis = name[:name_cursor]
+                            _cx = input_rect.x + 6 + _font.size(_vis)[0]
+                            pygame.draw.line(self.display, white,
+                                             (_cx, input_rect.y + 4),
+                                             (_cx, input_rect.bottom - 4))
                         self._draw_footer_block([
                             'Type level name and press Enter to save',
                             'Esc cancels naming and exits designer without save',

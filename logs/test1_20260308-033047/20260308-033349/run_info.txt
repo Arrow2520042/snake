@@ -1,6 +1,0 @@
-timestamp: 20260308-033349
-episodes: 600
-max_steps: 15000
-save_path: v1.pth
-use_dqn: True
-device: auto
