@@ -282,6 +282,8 @@ class DQNAgent:
         self.replay.update_priorities(indices, td_errors)
         self._soft_update()
 
+    def decay_epsilon(self):
+        """Call once per round from training loop (not per gradient update)."""
         if self.eps > self.eps_min:
             self.eps *= self.eps_decay
             if self.eps < self.eps_min:

@@ -78,11 +78,23 @@
 
 ### Medium priority (tooling & experiments)
 - [ ] Implement curriculum learning scheduler (auto board-size progression)
-- [ ] Add seed support and deterministic mode for reproducible experiments
 - [ ] Implement CNN agent training pipeline (full-board vision alternative)
 - [x] Add training metrics panel: avg reward/N episodes, episode length, win-rate
 
 ### Low priority (code quality)
 - [ ] Extract `live_trainer.py` from `game.py` __main__ block
-- [ ] Add unit tests: collision, state encoding, action mapping, level load/save
-- [ ] Add FPS/step profiler and DQN benchmark
+- [x] Add unit tests: collision, state encoding, action mapping, level load/save (test_snake.py, 25 tests)
+- [x] Add FPS/step profiler: sps (env steps/sec) added to training log line
+
+
+## Completed (v7 gradient throughput & training stability)
+
+- [x] updates_per_round = num_envs // 8 (8 gradient updates per round with 64 envs; ratio 1:8 vs old 1:64)
+- [x] batch_size 128 → 256 (more stable gradients, less variance per update)
+- [x] ReduceLROnPlateau patience 3000 → 50 (called every 50 eps → real patience ~2500 eps)
+- [x] save_every default 200 → 3000 (fewer checkpoint files)
+- [x] Stagnation rollback: auto-load best.pth if avg50 stagnates for 3000 eps (keeps epsilon)
+- [x] best.pth saved on every new avg50 peak
+- [x] Rolling avg_loss EMA tracked in DQNAgent; exposed as agent.avg_loss
+- [x] Log line extended: loss=X.XXXX sps=XXXX (training loss + env steps/sec)
+- [x] Unit tests in test_snake.py: collision, state encoding, action mapping, food placement, level load (25 tests, run: python test_snake.py)

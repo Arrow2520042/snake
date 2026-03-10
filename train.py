@@ -183,6 +183,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         # Multiple gradient updates per round to compensate for many envs
         for _ in range(updates_per_round):
             agent.update()
+        agent.decay_epsilon()  # once per round, not per gradient update
 
     # -- save final models ----------------------------------------------
     np.savez_compressed(log_path,
