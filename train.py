@@ -213,12 +213,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 rewards_acc[i] = 0.0
                 steps_acc[i] = 0
 
-        # Multiple gradient updates per round to compensate for many envs
-        for _ in range(updates_per_round):
-            loss_val, q_val = agent.update()
-            if loss_val is not None:
-                recent_losses.append(loss_val)
-                recent_qvals.append(q_val)
+        # Multiple gradient updates per round to compensate for many envs + buffer warmup
+        if len(agent.replay) >= 10000:
+            for _ in range(updates_per_round):
+                loss_val, q_val = agent.update()
+                if loss_val is not None:
+                    recent_losses.append(loss_val)
+                    recent_qvals.append(q_val)
+                    
         agent.decay_epsilon()  # once per round, not per gradient update
 
     # -- save final models ----------------------------------------------

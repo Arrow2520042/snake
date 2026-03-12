@@ -1,0 +1,13 @@
+agent_type: cnn
+simple_rewards: True
+device: cuda
+level_path: None
+init_checkpoint: v11_b10_e130k_s.pth
+episodes: 70000
+max_steps: 15000
+board_size: 10
+num_envs: 128
+n_step: 20
+eps_start: 0.010000
+lr_start: 5.0e-04
+started: 20260312-115706

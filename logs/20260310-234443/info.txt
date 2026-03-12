@@ -1,0 +1,13 @@
+agent_type: cnn
+simple_rewards: False
+device: cuda
+level_path: None
+init_checkpoint: modekl_ep10000.pth
+episodes: 40000
+max_steps: 15000
+board_size: 10
+num_envs: 128
+n_step: 20
+eps_start: 1.000000
+lr_start: 5.0e-04
+started: 20260310-234443
