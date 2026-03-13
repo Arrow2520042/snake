@@ -149,6 +149,9 @@ class SnakeGameAI:
         center = self.board_blocks // 2
         self.head = (center, center)
         self.snake = [self.head, (center - 1, center), (center - 2, center)]
+        # Stable segment IDs: new segment gets next ID and keeps it for the whole episode.
+        self.snake_segment_ids = [1, 2, 3]
+        self._next_segment_id = 4
         self.snake_body_set = set(self.snake[1:])
         self.score = 0
         self.food = None
@@ -256,6 +259,10 @@ class SnakeGameAI:
             self._just_ate = True
             self.score += 1
             self._steps_since_food = 0
+            # Growth adds a new tail segment with a brand-new permanent ID.
+            if len(self.snake_segment_ids) < len(self.snake):
+                self.snake_segment_ids.append(self._next_segment_id)
+                self._next_segment_id += 1
             self._place_food()
             self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
             if self.simple_rewards:
@@ -293,7 +300,9 @@ class SnakeGameAI:
                 reward -= 0.1
 
             # Hunger penalty: escalating cost for circling without eating
-            if self._steps_since_food > self.board_blocks * 2:
+            # Scale threshold by snake length — longer snake needs more steps to navigate
+            hunger_threshold = self.board_blocks * 2 + len(self.snake)
+            if self._steps_since_food > hunger_threshold:
                 hunger_ratio = self._steps_since_food / food_timeout
                 reward -= 0.1 * hunger_ratio
 
@@ -306,7 +315,9 @@ class SnakeGameAI:
         else:
             # simple_rewards mode
             # Hunger penalty: escalating cost for idleness (stronger than complex mode)
-            if self._steps_since_food > self.board_blocks:
+            # Scale threshold by snake length — longer snake needs more steps to navigate
+            hunger_threshold = self.board_blocks + len(self.snake)
+            if self._steps_since_food > hunger_threshold:
                 hunger_ratio = self._steps_since_food / food_timeout
                 reward -= 0.3 * hunger_ratio
             if self.state_mode == 'features':
@@ -848,13 +859,13 @@ if __name__ == '__main__':
                                 env.speed = max(10, env.speed - 10)
                     try:
                         env._draw_panel_box(panel_bg)
-                        n = min(50, len(recent_scores)) if recent_scores else 0
+                        n = min(200, len(recent_scores)) if recent_scores else 0
                         if n:
-                            avg_s = sum(recent_scores[-50:]) / n
-                            avg_t = sum(recent_steps[-50:]) / n
-                            avg_txt = f'Avg50: {avg_s:.2f} / {avg_t:.1f}'
+                            avg_s = sum(recent_scores[-200:]) / n
+                            avg_t = sum(recent_steps[-200:]) / n
+                            avg_txt = f'Avg200: {avg_s:.2f} / {avg_t:.1f}'
                         else:
-                            avg_txt = 'Avg50: n/a'
+                            avg_txt = 'Avg200: n/a'
                         lines = [
                             f'** {reason_text} **',
                             f'Episode: {ep}  Score: {score}/{max_score}',
@@ -980,12 +991,12 @@ if __name__ == '__main__':
                         move_txt = last_abs_dir if last_abs_dir else 'n/a'
                         q_txt = format_q_values(last_q_values)
                         if recent_scores:
-                            n = min(50, len(recent_scores))
-                            avg_s = sum(recent_scores[-50:]) / n
-                            avg_t = sum(recent_steps[-50:]) / n
-                            avg_txt = f'Avg50: {avg_s:.2f} / {avg_t:.1f}'
+                            n = min(200, len(recent_scores))
+                            avg_s = sum(recent_scores[-200:]) / n
+                            avg_t = sum(recent_steps[-200:]) / n
+                            avg_txt = f'Avg200: {avg_s:.2f} / {avg_t:.1f}'
                         else:
-                            avg_txt = 'Avg50: n/a'
+                            avg_txt = 'Avg200: n/a'
 
                         lines = [
                             f'Episode: {ep}  Step: {ep_steps}',

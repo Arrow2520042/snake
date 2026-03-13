@@ -64,10 +64,10 @@ def run_single(params, episodes, max_steps, level_path, board_size):
         agent.decay_epsilon()
 
     elapsed = time.time() - t0
-    avg_last50 = sum(scores[-50:]) / min(50, len(scores)) if scores else 0
+    avg_last200 = sum(scores[-200:]) / min(200, len(scores)) if scores else 0
     return {
         'best_score': best_score,
-        'avg_last50': avg_last50,
+        'avg_last200': avg_last200,
         'elapsed': elapsed,
         'final_eps': agent.eps,
     }
@@ -93,7 +93,7 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
     results_path = os.path.join(log_dir, 'sweep_results.csv')
     with open(results_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(keys + ['best_score', 'avg_last50', 'elapsed', 'final_eps'])
+        writer.writerow(keys + ['best_score', 'avg_last200', 'elapsed', 'final_eps'])
 
     for i, vals in enumerate(combos):
         params = dict(zip(keys, vals))
@@ -107,11 +107,11 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
             writer = csv.writer(f)
             writer.writerow(
                 [params[k] for k in keys]
-                + [result['best_score'], f"{result['avg_last50']:.2f}",
+                + [result['best_score'], f"{result['avg_last200']:.2f}",
                    f"{result['elapsed']:.1f}", f"{result['final_eps']:.4f}"]
             )
 
-        print(f'  -> best={result["best_score"]} avg50={result["avg_last50"]:.2f} '
+        print(f'  -> best={result["best_score"]} avg200={result["avg_last200"]:.2f} '
               f'time={result["elapsed"]:.0f}s')
 
     print(f'\nSweep complete. Results: {results_path}')

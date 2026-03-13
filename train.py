@@ -109,11 +109,12 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           f'envs={num_envs} | updates/round={max(1, num_envs // 16)} | logs -> {log_dir}')
 
     best_score = 0
-    best_avg50 = 0.0
+    METRIC_WINDOW = 200
+    best_avg200 = 0.0
     best_ckpt_path = os.path.join(log_dir, 'best.pth')
     stagnation_counter = 0
     STAGNATION_THRESHOLD = 15000  # episodes without meaningful improvement before rollback
-    STAGNATION_TOLERANCE = 0.9   # tolerate avg50 down to 90% of best before counting as stagnation
+    STAGNATION_TOLERANCE = 0.9   # tolerate avg200 down to 90% of best before counting as stagnation
     ROLLBACK_EPS_THRESHOLD = 0.3  # don't rollback while still exploring (eps >= 0.3)
     updates_per_round = max(1, num_envs // 16)  # e.g. 128 envs → 8 updates/round
     t_start = time.time()
@@ -151,33 +152,46 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 ep_reward = rewards_acc[i]
                 recent_scores.append(score)
                 recent_rewards.append(ep_reward)
-                avg50 = sum(recent_scores[-50:]) / len(recent_scores[-50:])
-                avgR50 = sum(recent_rewards[-50:]) / len(recent_rewards[-50:])
+                # Używamy średniej z 200 ostatnich epizodów dla większej stabilności
+                avg200 = sum(recent_scores[-METRIC_WINDOW:]) / len(recent_scores[-METRIC_WINDOW:])
+                avgR200 = sum(recent_rewards[-METRIC_WINDOW:]) / len(recent_rewards[-METRIC_WINDOW:])
 
                 if score > best_score:
                     best_score = score
 
-                # Track best avg50 and save best checkpoint
-                if len(recent_scores) >= 50:
-                    if avg50 > best_avg50:
-                        best_avg50 = avg50
+                # Track best avg200 and save best checkpoint
+                if len(recent_scores) >= METRIC_WINDOW:
+                    if avg200 > best_avg200:
+                        best_avg200 = avg200
                         stagnation_counter = 0
                         agent.save(best_ckpt_path)
-                    elif avg50 >= best_avg50 * STAGNATION_TOLERANCE:
+                    elif avg200 >= best_avg200 * STAGNATION_TOLERANCE:
                         # Within tolerance band — don't count as stagnation
                         pass
                     else:
                         stagnation_counter += 1
 
-                    # Rollback to best checkpoint on prolonged stagnation
                     if (stagnation_counter >= STAGNATION_THRESHOLD
                             and agent.eps < ROLLBACK_EPS_THRESHOLD
                             and os.path.isfile(best_ckpt_path)):
                         old_eps = agent.eps
                         agent.load(best_ckpt_path)
-                        agent.eps = old_eps  # keep current exploration rate
+                        
+                        # Zastrzyk eksploracji
+                        agent.eps = min(max(old_eps * 3, 0.05), 0.15)
+                        
+                        # ROZWIĄZANIE KONFLIKTU: Reset Learning Rate i Schedulera
+                        # Skoro znowu eksplorujemy, potrzebujemy standardowego LR (5e-4)
+                        for param_group in agent.optimizer.param_groups:
+                            param_group['lr'] = 5.0e-04
+                        
+                        # Resetujemy też sam scheduler, żeby nie pamiętał starych skoków
+                        agent.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                            agent.optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5
+                        )
+                        
                         stagnation_counter = 0
-                        print(f'  >> ROLLBACK to best (avg50={best_avg50:.1f}) at ep {ep_counter}')
+                        print(f'  >> ROLLBACK to best (avg200={best_avg200:.1f}) at ep {ep_counter}, eps boosted to {agent.eps:.4f}')
 
                 all_scores.append(score)
                 all_rewards.append(ep_reward)
@@ -194,16 +208,24 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 if ep_counter % 1000 == 0 or ep_counter == 1:
                     elapsed = time.time() - t_start
                     lr = agent.optimizer.param_groups[0]['lr']
-                    avgSteps = sum(all_steps[-50:]) / max(1, len(all_steps[-50:]))
+                    avgSteps = (
+                        sum(all_steps[-METRIC_WINDOW:])
+                        / max(1, len(all_steps[-METRIC_WINDOW:]))
+                    )
                     avg_loss = sum(recent_losses[-200:]) / max(1, len(recent_losses[-200:])) if recent_losses else 0.0
                     avg_q = sum(recent_qvals[-200:]) / max(1, len(recent_qvals[-200:])) if recent_qvals else 0.0
                     print(f'ep {ep_counter}/{episodes} | '
-                          f'best={best_score} avg50={avg50:.1f} '
-                          f'avgR50={avgR50:.1f} avgSteps={avgSteps:.0f} | '
+                          f'best={best_score} avg200={avg200:.1f} '
+                          f'avgR200={avgR200:.1f} avgSteps={avgSteps:.0f} | '
                           f'loss={avg_loss:.4f} Q={avg_q:.2f} | '
                           f'eps={agent.eps:.4f} lr={lr:.1e} '
                           f'elapsed={elapsed:.0f}s')
-                    agent.step_scheduler(avg50)
+                    # Zawieszamy schedulera, jeśli model właśnie eksploruje po Rollbacku
+                    # Nie chcemy obniżać LR, gdy Epsilon jest wyższy niż 2%
+                    if agent.eps <= 0.02:
+                        # Podajemy best_avg200 zamiast skaczącego avg200
+                        # Dzięki temu scheduler zmniejszy LR, jeśli przez 10k epizodów nie pobijemy rekordu
+                        agent.step_scheduler(best_avg200)
 
                 if ep_counter % save_every == 0:
                     agent.save(os.path.join(log_dir, f'model_ep{ep_counter}.pth'))

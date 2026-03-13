@@ -26,6 +26,17 @@ def update_ui(self):
     # Draw snake (cell coords → pixel) — head is green
     head_outer = (0, 160, 0)
     head_inner = (0, 220, 0)
+
+    # Cache label font by block size so segment numbers stay readable
+    segment_font_size = max(12, int(bs * 0.55))
+    if getattr(self, '_segment_label_font_size', None) != segment_font_size:
+        self._segment_label_font = pygame.font.Font(
+            pygame.font.get_default_font(), segment_font_size)
+        self._segment_label_font_size = segment_font_size
+    segment_font = getattr(self, '_segment_label_font', self.small_font or self.font)
+    segment_ids = getattr(self, 'snake_segment_ids', None)
+    use_stable_ids = isinstance(segment_ids, list) and len(segment_ids) == len(self.snake)
+
     for i, cell in enumerate(self.snake):
         px = bx + cell[0] * bs
         py = by + cell[1] * bs
@@ -37,6 +48,12 @@ def update_ui(self):
         else:
             pygame.draw.rect(disp, blue1, r_outer)
             pygame.draw.rect(disp, blue2, r_inner)
+
+        if segment_font is not None:
+            seg_id = segment_ids[i] if use_stable_ids else (i + 1)
+            label = segment_font.render(str(seg_id), True, black if i == 0 else white)
+            label_rect = label.get_rect(center=(px + bs // 2, py + bs // 2))
+            disp.blit(label, label_rect)
 
     # Draw food
     if self.food:

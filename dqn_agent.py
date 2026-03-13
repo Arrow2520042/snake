@@ -320,7 +320,7 @@ class DQNAgent:
             tp.data.copy_(self.tau * pp.data + (1.0 - self.tau) * tp.data)
 
     def step_scheduler(self, metric):
-        """Step the LR scheduler with a score metric (e.g. avg50 score)."""
+        """Step the LR scheduler with a score metric (e.g. avg200 score)."""
         self.scheduler.step(metric)
 
     def save(self, path):

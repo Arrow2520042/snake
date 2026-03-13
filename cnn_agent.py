@@ -94,7 +94,7 @@ class CNNAgent:
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=50, min_lr=1e-5)
+            self.optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
 
         self.steps = 0
