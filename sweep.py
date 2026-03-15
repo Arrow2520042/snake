@@ -19,6 +19,7 @@ from game import SnakeGameAI
 
 
 def run_single(params, episodes, max_steps, level_path, board_size):
+    """Train one short run and return comparable summary metrics."""
     from dqn_agent import DQNAgent
 
     env = SnakeGameAI(render=False, board_blocks=board_size)
@@ -49,6 +50,7 @@ def run_single(params, episodes, max_steps, level_path, board_size):
     for ep in range(1, episodes + 1):
         state = env.reset()
         total_reward = 0.0
+        # Standard online loop: act -> step env -> store transition -> update agent.
         for t in range(max_steps):
             action = agent.act(state)
             ns, reward, done, info = env.play_step(action, skip_events=True)
@@ -64,16 +66,17 @@ def run_single(params, episodes, max_steps, level_path, board_size):
         agent.decay_epsilon()
 
     elapsed = time.time() - t0
-    avg_last200 = sum(scores[-200:]) / min(200, len(scores)) if scores else 0
+    avg200 = sum(scores[-200:]) / min(200, len(scores)) if scores else 0
     return {
         'best_score': best_score,
-        'avg_last200': avg_last200,
+        'avg200': avg200,
         'elapsed': elapsed,
         'final_eps': agent.eps,
     }
 
 
 def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
+    """Run a Cartesian hyperparameter sweep and write ranked CSV-ready results."""
     search_space = {
         'lr': [1e-3, 5e-4, 1e-4],
         'gamma': [0.99, 0.95],
@@ -93,7 +96,7 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
     results_path = os.path.join(log_dir, 'sweep_results.csv')
     with open(results_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(keys + ['best_score', 'avg_last200', 'elapsed', 'final_eps'])
+        writer.writerow(keys + ['best_score', 'avg200', 'elapsed', 'final_eps'])
 
     for i, vals in enumerate(combos):
         params = dict(zip(keys, vals))
@@ -107,11 +110,11 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
             writer = csv.writer(f)
             writer.writerow(
                 [params[k] for k in keys]
-                + [result['best_score'], f"{result['avg_last200']:.2f}",
+                + [result['best_score'], f"{result['avg200']:.2f}",
                    f"{result['elapsed']:.1f}", f"{result['final_eps']:.4f}"]
             )
 
-        print(f'  -> best={result["best_score"]} avg200={result["avg_last200"]:.2f} '
+        print(f'  -> best={result["best_score"]} avg200={result["avg200"]:.2f} '
               f'time={result["elapsed"]:.0f}s')
 
     print(f'\nSweep complete. Results: {results_path}')

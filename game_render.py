@@ -1,7 +1,13 @@
+"""Rendering helpers for the Snake MVC view layer.
+
+The model keeps cell-based state; this module is responsible for drawing it.
+"""
+
 import pygame
 
 
 def update_ui(self):
+    """Render the current frame: board, snake, food, walls, and side panels."""
     if not self.render:
         return
 
@@ -23,11 +29,11 @@ def update_ui(self):
     by = self.board_y
     disp.fill(black)
 
-    # Draw snake (cell coords → pixel) — head is green
+    # Convert model cells to pixels and render snake segments.
     head_outer = (0, 160, 0)
     head_inner = (0, 220, 0)
 
-    # Cache label font by block size so segment numbers stay readable
+    # Cache font by block size so segment IDs remain readable across zoom levels.
     segment_font_size = max(12, int(bs * 0.55))
     if getattr(self, '_segment_label_font_size', None) != segment_font_size:
         self._segment_label_font = pygame.font.Font(
@@ -55,13 +61,13 @@ def update_ui(self):
             label_rect = label.get_rect(center=(px + bs // 2, py + bs // 2))
             disp.blit(label, label_rect)
 
-    # Draw food
+    # Draw food cell.
     if self.food:
         fx = bx + self.food[0] * bs
         fy = by + self.food[1] * bs
         pygame.draw.rect(disp, red, pygame.Rect(fx, fy, bs, bs))
 
-    # Draw walls
+    # Draw static obstacle walls.
     walls = getattr(self, 'walls', None)
     if walls:
         for cell in walls:
@@ -69,11 +75,10 @@ def update_ui(self):
             wy = by + cell[1] * bs
             pygame.draw.rect(disp, (100, 100, 100), pygame.Rect(wx, wy, bs, bs))
 
-    # Board border
+    # Draw board border and UI containers.
     board_rect = pygame.Rect(bx, by, self.board_w, self.board_h)
     pygame.draw.rect(disp, board_border, board_rect, 2)
 
-    # Panels
     disp.fill(panel_bg, rect=self.left_panel_rect)
     pygame.draw.rect(disp, panel_border, self.left_panel_rect, 2)
     disp.fill(footer_bg, rect=self.footer_rect)
@@ -88,6 +93,7 @@ def update_ui(self):
 
 
 def draw_panel_box(self, rect):
+    """Draw a reusable framed panel rectangle."""
     if not self.render:
         return
     theme = getattr(self, 'theme', {})
@@ -98,6 +104,7 @@ def draw_panel_box(self, rect):
 
 
 def fit_text(self, text, font, max_width):
+    """Truncate text with ellipsis so it fits into max_width pixels."""
     t = str(text)
     if font is None:
         return t
@@ -112,6 +119,7 @@ def fit_text(self, text, font, max_width):
 
 
 def wrap_text(self, text, font, max_width):
+    """Wrap text into multiple lines that each fit max_width pixels."""
     if font is None:
         return [str(text)]
     src = str(text)
@@ -137,6 +145,7 @@ def wrap_text(self, text, font, max_width):
 
 
 def draw_footer_block(self, lines):
+    """Render wrapped helper text in the footer area."""
     if not self.render:
         return None
 

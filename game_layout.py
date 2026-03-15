@@ -1,3 +1,8 @@
+"""Layout helpers for the Snake MVC view layer.
+
+These functions compute pixel geometry from logical board dimensions.
+"""
+
 import pygame
 
 
@@ -44,6 +49,7 @@ def recompute_layout(self):
 
 
 def resize_window(self, w, h):
+    """Resize the render surface and recompute all dependent layout rectangles."""
     cfg = getattr(self, 'layout_cfg', {})
     min_window_w = int(cfg.get('min_window_w', 1000))
     min_window_h = int(cfg.get('min_window_h', 700))
@@ -56,6 +62,7 @@ def resize_window(self, w, h):
 
 
 def get_left_control_rects(self, panel_h=260):
+    """Return panel and control button rectangles for the left-side control area."""
     cfg = getattr(self, 'layout_cfg', {})
     ui_margin = int(cfg.get('ui_margin', 10))
 

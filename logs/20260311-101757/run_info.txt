@@ -1,4 +1,0 @@
-best_score: 24
-final_eps: 0.010000
-final_lr: 5.0e-04
-total_time: 5448.6s

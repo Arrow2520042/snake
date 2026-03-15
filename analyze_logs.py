@@ -1,9 +1,11 @@
+"""Analyze and visualize Snake training logs stored as NPZ or legacy CSV."""
+
 import csv, statistics, sys, os
 import numpy as np
 
 
 def load_data(path):
-    """Load training data from .npz (new) or .csv (legacy). Returns scores, rewards, steps."""
+    """Load scores, rewards, and steps from NPZ (preferred) or legacy CSV."""
     if path.endswith('.npz'):
         d = np.load(path)
         return d['scores'].astype(int).tolist(), d['rewards'].astype(float).tolist(), d['steps'].astype(int).tolist()
@@ -39,7 +41,7 @@ def analyze(path):
 
 
 def plot_training(path, save_dir=None):
-    """Generate training progress plots from a rewards.csv file."""
+    """Generate training progress plots from an NPZ or CSV log file."""
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -52,7 +54,7 @@ def plot_training(path, save_dir=None):
     n = len(scores)
     episodes = list(range(1, n + 1))
 
-    # Rolling averages
+    # Rolling averages smooth high-variance episode outcomes.
     window = 50
     avg_scores = [sum(scores[max(0,i-window+1):i+1]) / len(scores[max(0,i-window+1):i+1]) for i in range(n)]
     avg_rewards = [sum(rewards[max(0,i-window+1):i+1]) / len(rewards[max(0,i-window+1):i+1]) for i in range(n)]

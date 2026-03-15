@@ -1,3 +1,12 @@
+"""Core DQN agent components for Snake training.
+
+This module contains:
+- Prioritized Experience Replay (PER) with SumTree.
+- N-step return buffering.
+- Dueling Double DQN policy/target networks.
+- Adam optimization and ReduceLROnPlateau scheduling.
+"""
+
 import random
 import numpy as np
 import torch
@@ -219,7 +228,9 @@ class DQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
+        # Adam performs adaptive first/second-moment gradient scaling.
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        # Scheduler lowers LR when score metric plateaus for many evaluations.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='max', factor=0.5, patience=50, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
@@ -229,21 +240,57 @@ class DQNAgent:
         self.eps_decay = 0.9997
         self._nstep_buffers = {}  # env_id -> NStepBuffer
 
-    def act(self, state):
+    def _normalize_action_mask(self, action_mask):
+        if action_mask is None:
+            return None
+        mask = np.asarray(action_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != self.n_actions:
+            return None
+        if not mask.any():
+            return np.ones(self.n_actions, dtype=bool)
+        return mask
+
+    def _normalize_action_masks(self, action_masks, batch_size):
+        if action_masks is None:
+            return None
+        masks = np.asarray(action_masks, dtype=bool)
+        if masks.shape != (batch_size, self.n_actions):
+            return None
+        dead_rows = ~masks.any(axis=1)
+        if dead_rows.any():
+            masks = masks.copy()
+            masks[dead_rows] = True
+        return masks
+
+    def act(self, state, action_mask=None):
         self.steps += 1
+        mask = self._normalize_action_mask(action_mask)
         if random.random() < self.eps:
+            if mask is not None:
+                valid = np.flatnonzero(mask)
+                return int(np.random.choice(valid))
             return random.randrange(self.n_actions)
         with torch.no_grad():
             s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-            return int(torch.argmax(self.policy_net(s)).item())
+            q_vals = self.policy_net(s).squeeze(0).detach().cpu().numpy()
+            if mask is not None:
+                q_vals = np.where(mask, q_vals, -1e9)
+            return int(np.argmax(q_vals))
 
-    def act_batch(self, states):
+    def act_batch(self, states, action_masks=None):
         """Select actions for a batch of states in a single forward pass."""
         n = len(states)
         self.steps += n
+        masks = self._normalize_action_masks(action_masks, n)
         rands = np.random.random(n)
         explore_mask = rands < self.eps
-        random_actions = np.random.randint(0, self.n_actions, size=n)
+        if masks is None:
+            random_actions = np.random.randint(0, self.n_actions, size=n)
+        else:
+            random_actions = np.empty(n, dtype=np.int64)
+            for i in range(n):
+                valid = np.flatnonzero(masks[i])
+                random_actions[i] = int(np.random.choice(valid))
 
         if explore_mask.all():
             return random_actions
@@ -251,7 +298,12 @@ class DQNAgent:
         with torch.no_grad():
             batch = torch.as_tensor(np.array(states), dtype=torch.float32).to(self.device)
             q_values = self.policy_net(batch)
-            greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+            if masks is None:
+                greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+            else:
+                q_np = q_values.detach().cpu().numpy()
+                masked_q = np.where(masks, q_np, -1e9)
+                greedy_actions = masked_q.argmax(axis=1)
 
         actions = np.where(explore_mask, random_actions, greedy_actions)
         return actions
@@ -269,6 +321,7 @@ class DQNAgent:
 
 
     def update(self):
+        """Run one DQN optimization step using PER-weighted Double DQN targets."""
         if len(self.replay) < self.batch_size:
             return None, None
         sample = self.replay.sample(self.batch_size)
@@ -297,6 +350,7 @@ class DQNAgent:
         td_errors = (q_values - target).detach().cpu().squeeze(1).numpy()
         loss = (w_t * nn.functional.mse_loss(q_values, target, reduction='none')).mean()
 
+        # Standard Adam update: zero grad -> backprop -> gradient clipping -> optimizer step.
         self.optimizer.zero_grad()
         loss.backward()
         if self.max_grad_norm and self.max_grad_norm > 0:
@@ -316,11 +370,12 @@ class DQNAgent:
                 self.eps = self.eps_min
 
     def _soft_update(self):
+        """Polyak averaging: target <- tau * policy + (1 - tau) * target."""
         for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
             tp.data.copy_(self.tau * pp.data + (1.0 - self.tau) * tp.data)
 
     def step_scheduler(self, metric):
-        """Step the LR scheduler with a score metric (e.g. avg200 score)."""
+        """Step ReduceLROnPlateau with a score metric (for example avg200)."""
         self.scheduler.step(metric)
 
     def save(self, path):

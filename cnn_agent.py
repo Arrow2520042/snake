@@ -3,6 +3,11 @@
 Uses a grid observation (body_age, head, food, walls) + auxiliary vector
 (direction one-hot, normalized length) instead of hand-crafted features.
 Shares PER and NStepBuffer infrastructure with dqn_agent.py.
+
+Training stack highlights:
+- Adam optimizer for adaptive gradient updates.
+- ReduceLROnPlateau scheduler for score-based LR decay.
+- Soft target network updates (Polyak averaging).
 """
 
 import random
@@ -92,7 +97,9 @@ class CNNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
+        # Adam optimizer drives gradient-based learning of the policy network.
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        # Scheduler decays learning rate when validation metric (avg200) stalls.
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
@@ -104,22 +111,58 @@ class CNNAgent:
         self._nstep_buffers = {}
 
     # -- action selection ------------------------------------------------
-    def act(self, state):
+    def _normalize_action_mask(self, action_mask):
+        if action_mask is None:
+            return None
+        mask = np.asarray(action_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != self.n_actions:
+            return None
+        if not mask.any():
+            return np.ones(self.n_actions, dtype=bool)
+        return mask
+
+    def _normalize_action_masks(self, action_masks, batch_size):
+        if action_masks is None:
+            return None
+        masks = np.asarray(action_masks, dtype=bool)
+        if masks.shape != (batch_size, self.n_actions):
+            return None
+        dead_rows = ~masks.any(axis=1)
+        if dead_rows.any():
+            masks = masks.copy()
+            masks[dead_rows] = True
+        return masks
+
+    def act(self, state, action_mask=None):
         self.steps += 1
+        mask = self._normalize_action_mask(action_mask)
         if random.random() < self.eps:
+            if mask is not None:
+                valid = np.flatnonzero(mask)
+                return int(np.random.choice(valid))
             return random.randrange(self.n_actions)
         with torch.no_grad():
             s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-            return int(torch.argmax(self.policy_net(s)).item())
+            q_vals = self.policy_net(s).squeeze(0).detach().cpu().numpy()
+            if mask is not None:
+                q_vals = np.where(mask, q_vals, -1e9)
+            return int(np.argmax(q_vals))
 
-    def act_batch(self, states):
+    def act_batch(self, states, action_masks=None):
         """Select actions for a batch of states in a single forward pass."""
         n = len(states)
         self.steps += n
+        masks = self._normalize_action_masks(action_masks, n)
         # Decide which envs explore vs exploit
         rands = np.random.random(n)
         explore_mask = rands < self.eps
-        random_actions = np.random.randint(0, self.n_actions, size=n)
+        if masks is None:
+            random_actions = np.random.randint(0, self.n_actions, size=n)
+        else:
+            random_actions = np.empty(n, dtype=np.int64)
+            for i in range(n):
+                valid = np.flatnonzero(masks[i])
+                random_actions[i] = int(np.random.choice(valid))
 
         # If all exploring, skip the forward pass entirely
         if explore_mask.all():
@@ -128,7 +171,12 @@ class CNNAgent:
         with torch.no_grad():
             batch = torch.as_tensor(np.array(states), dtype=torch.float32).to(self.device)
             q_values = self.policy_net(batch)
-            greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+            if masks is None:
+                greedy_actions = q_values.argmax(dim=1).cpu().numpy()
+            else:
+                q_np = q_values.detach().cpu().numpy()
+                masked_q = np.where(masks, q_np, -1e9)
+                greedy_actions = masked_q.argmax(axis=1)
 
         actions = np.where(explore_mask, random_actions, greedy_actions)
         return actions
@@ -146,6 +194,7 @@ class CNNAgent:
 
     # -- gradient update -------------------------------------------------
     def update(self):
+        """Run one CNN-DQN optimization step with PER weighting and n-step targets."""
         if len(self.replay) < self.batch_size:
             return None, None
         sample = self.replay.sample(self.batch_size)
@@ -173,6 +222,7 @@ class CNNAgent:
         td_errors = (q_values - target).detach().cpu().squeeze(1).numpy()
         loss = (w_t * nn.functional.mse_loss(q_values, target, reduction='none')).mean()
 
+        # Adam update step with optional gradient clipping for stability.
         self.optimizer.zero_grad()
         loss.backward()
         if self.max_grad_norm > 0:
@@ -196,6 +246,7 @@ class CNNAgent:
 
     # -- soft target update ----------------------------------------------
     def _soft_update(self):
+        """Polyak averaging: target <- tau * policy + (1 - tau) * target."""
         for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
             tp.data.copy_(self.tau * pp.data + (1.0 - self.tau) * tp.data)
 

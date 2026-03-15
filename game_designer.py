@@ -1,3 +1,9 @@
+"""Level editor view/controller helper for custom Snake maps.
+
+This module contains an interactive in-game editor used to place/remove walls
+and save level layouts as JSON files.
+"""
+
 import datetime
 import json
 import os
@@ -6,7 +12,14 @@ import pygame
 
 
 def level_designer(self):
-    """Simple level editor: click to add/remove wall blocks. Press Enter to save."""
+    """Interactive wall-map editor for custom Snake levels.
+
+    Controls:
+    - Left click: toggle wall cell.
+    - Enter: open naming input and save to levels/<name>_<timestamp>.json.
+    - Escape / Back button: cancel and return to the menu.
+    - S/L: quick save/load from level.json for rapid iteration.
+    """
     if not self.render:
         print('Level designer requires render mode (GUI).')
         return None
@@ -91,10 +104,10 @@ def level_designer(self):
 
                         _font = self.small_font or self.font
                         self._update_ui()
-                        # Label above input
+                        # Render inline naming dialog on top of current scene.
                         label_surf = _font.render('Level name (Enter save, Esc cancel):', True, white)
                         self.display.blit(label_surf, (input_rect.x + 2, input_rect.y - label_surf.get_height() - 4))
-                        # Input box
+                        # Draw text input with a blinking caret.
                         self._draw_panel_box(input_rect)
                         name_display = self._fit_text(name, _font, input_rect.width - 12)
                         name_surf = _font.render(name_display, True, white)
@@ -118,6 +131,7 @@ def level_designer(self):
 
                     levels_dir = 'levels'
                     os.makedirs(levels_dir, exist_ok=True)
+                    # Keep filenames portable: letters, digits, space, dash, underscore.
                     safe = ''.join(c for c in name if c.isalnum() or c in (' ', '-', '_')).rstrip()
                     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
                     level_name = f'{safe}_{ts}.json'

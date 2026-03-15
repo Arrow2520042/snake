@@ -1,7 +1,7 @@
-"""Replay a saved episode CSV visually in the Snake GUI.
+"""Visual replay utility for trained Snake checkpoints.
 
-Reads a rewards.csv from a training run and replays the last (or chosen)
-episode by re-running the environment with the saved checkpoint.
+This tool loads a model checkpoint, runs deterministic evaluation episodes
+(`eps=0`), and displays them in the GUI for qualitative inspection.
 
 Usage:
     python replay_viewer.py logs/20260308-033349/v1.pth
@@ -15,9 +15,10 @@ from game import SnakeGameAI
 
 
 def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
+    """Replay deterministic evaluation episodes from a trained checkpoint."""
     import torch
 
-    # Auto-detect agent type from checkpoint
+    # Auto-detect architecture from checkpoint keys.
     data = torch.load(checkpoint, map_location='cpu', weights_only=False)
     if isinstance(data, dict) and 'board_size' in data:
         from cnn_agent import CNNAgent
@@ -45,6 +46,7 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
         env.walls = walls
 
     agent.load(checkpoint)
+    # Deterministic policy execution for qualitative debugging.
     agent.eps = 0.0
     agent.policy_net.eval()
 
@@ -75,7 +77,7 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
 
         print(f'Episode {ep}: score={env.score} reward={total_reward:.1f} steps={steps}')
 
-        # Brief pause between episodes
+        # Brief pause between episodes so results are visible.
         pause = 60
         while pause > 0:
             for event in pygame.event.get():

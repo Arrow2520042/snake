@@ -1,0 +1,4 @@
+best_score: 50
+final_eps: 0.010000
+final_lr: 1.6e-05
+total_time: 70355.6s
