@@ -5,7 +5,7 @@ for higher throughput.  CUDA used automatically when available.
 
 Usage:
     python train.py --episodes 1000
-    python train.py --agent cnn --simple-rewards --board-size 10 --num-envs 64
+    python train.py --simple-rewards --board-size 10 --num-envs 64
     python train.py --v12-from-scratch --episodes 300000
     python train.py --level levels/mymap.json --board-size 20
     python train.py --init-checkpoint model.pth --episodes 500
@@ -15,6 +15,7 @@ import argparse
 import datetime
 import json
 import os
+import random
 import time
 
 import numpy as np
@@ -37,7 +38,7 @@ def _load_walls(level_path, board_blocks):
 def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           init_checkpoint=None, log_name=None, save_path='model.pth',
           board_size=20, num_envs=1, fresh=False,
-          agent_type='dqn', simple_rewards=False,
+          agent_type='cnn', simple_rewards=False,
           action_masking=True,
           reward_mode='blend', reward_switch_start=0.25,
           reward_switch_end=0.35,
@@ -45,7 +46,12 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           resume_eps_boost=False, resume_eps_mult=2.5,
           resume_eps_min=0.04, resume_eps_max=0.12,
           rollback_eps_mult=2.5, rollback_eps_min=0.04,
-          rollback_eps_max=0.12, rollback_eps_hold_episodes=3000):
+          rollback_eps_max=0.12, rollback_eps_hold_episodes=3000,
+          eval_every=5000, eval_episodes=20,
+          eval_max_steps=None, eval_seed=12345,
+          rollback_source='auto', scheduler_source='auto',
+          walls_mode=False,
+          instant_eval_drop_ratio=0.50):
     """Main training orchestrator.
 
     Responsibilities in this function:
@@ -105,14 +111,22 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     scheduler_patience = 10 if agent_type == 'cnn' else 50
 
     walls = None
+    wall_count = 0
+    wall_ratio = 0.0
     if level_path and os.path.isfile(level_path):
         walls = _load_walls(level_path, board_size)
+        wall_count = len(walls)
+        total_cells = max(1, board_size * board_size)
+        wall_ratio = wall_count / float(total_cells)
         print(f'Loaded level: {level_path} ({len(walls)} walls)')
+    if walls_mode and not walls:
+        raise ValueError('--walls mode requires a valid --level file')
 
     # 4) Create parallel environments (single process, round-robin stepping).
     envs = []
     for _ in range(num_envs):
         env = SnakeGameAI(render=False, board_blocks=board_size,
+                          max_episode_steps=max_steps,
                           state_mode=state_mode,
                           simple_rewards=(effective_reward_mode == 'simple'),
                           reward_mode=effective_reward_mode,
@@ -121,6 +135,68 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         if walls:
             env.walls = walls
         envs.append(env)
+
+    def _run_deterministic_eval(eval_round_idx):
+        """Run greedy evaluation (eps=0, action mask on) on fixed seeds."""
+        old_eps = agent.eps
+        old_steps = agent.steps
+        was_training = agent.policy_net.training
+
+        py_state = random.getstate()
+        np_state = np.random.get_state()
+        torch_state = torch.random.get_rng_state()
+        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        agent.eps = 0.0
+        agent.policy_net.eval()
+
+        eval_env = SnakeGameAI(render=False, board_blocks=board_size,
+                               max_episode_steps=eval_max_steps,
+                               state_mode=state_mode,
+                               simple_rewards=(effective_reward_mode == 'simple'),
+                               reward_mode=effective_reward_mode,
+                               reward_switch_start=reward_switch_start,
+                               reward_switch_end=reward_switch_end)
+        if walls:
+            eval_env.walls = set(walls)
+
+        scores = []
+        step_counts = []
+        try:
+            for ep_idx in range(eval_episodes):
+                seed_val = eval_seed + eval_round_idx * 10007 + ep_idx
+                random.seed(seed_val)
+                np.random.seed(seed_val & 0xFFFFFFFF)
+                torch.manual_seed(seed_val)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed_val)
+
+                state = eval_env.reset()
+                done = False
+                steps = 0
+                while (not done) and steps < eval_max_steps:
+                    mask = eval_env.get_safe_action_mask()
+                    action = int(agent.act(state, action_mask=mask))
+                    state, _, done, _ = eval_env.play_step(action, skip_events=True)
+                    steps += 1
+
+                scores.append(float(eval_env.score))
+                step_counts.append(float(steps))
+        finally:
+            agent.eps = old_eps
+            agent.steps = old_steps
+            if was_training:
+                agent.policy_net.train()
+
+            random.setstate(py_state)
+            np.random.set_state(np_state)
+            torch.random.set_rng_state(torch_state)
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
+
+        avg_score = float(np.mean(scores)) if scores else 0.0
+        avg_steps = float(np.mean(step_counts)) if step_counts else 0.0
+        return avg_score, avg_steps
 
     device_name = getattr(agent, 'device', 'cpu')
     print(f'Agent: {agent_type.upper()} | device: {device_name} | '
@@ -158,6 +234,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'episodes: {episodes}\n')
             fi.write(f'max_steps: {max_steps}\n')
             fi.write(f'board_size: {board_size}\n')
+            fi.write(f'walls_mode: {bool(walls_mode)}\n')
+            fi.write(f'wall_count: {wall_count}\n')
+            fi.write(f'wall_ratio: {wall_ratio:.6f}\n')
             fi.write(f'num_envs: {num_envs}\n')
             fi.write(f'n_step: {agent.n_step}\n')
             fi.write(f'eps_start: {agent.eps:.6f}\n')
@@ -171,6 +250,13 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'rollback_eps_min: {rollback_eps_min:.3f}\n')
             fi.write(f'rollback_eps_max: {rollback_eps_max:.3f}\n')
             fi.write(f'rollback_eps_hold_episodes: {rollback_eps_hold_episodes}\n')
+            fi.write(f'eval_every: {eval_every}\n')
+            fi.write(f'eval_episodes: {eval_episodes}\n')
+            fi.write(f'eval_max_steps: {eval_max_steps}\n')
+            fi.write(f'eval_seed: {eval_seed}\n')
+            fi.write(f'instant_eval_drop_ratio: {instant_eval_drop_ratio:.3f}\n')
+            fi.write(f'rollback_source: {rollback_source}\n')
+            fi.write(f'scheduler_source: {scheduler_source}\n')
             fi.write(f'lr_start: {agent.optimizer.param_groups[0]["lr"]:.1e}\n')
             fi.write(f'started: {ts}\n')
     except Exception:
@@ -183,6 +269,13 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     METRIC_WINDOW = 200
     best_avg200 = 0.0
     best_ckpt_path = os.path.join(log_dir, 'best.pth')
+    best_eval_avg = -1.0
+    best_eval_ckpt_path = os.path.join(log_dir, 'best_eval.pth')
+    eval_points = []
+    eval_avg_scores = []
+    eval_avg_steps = []
+    latest_eval_score = None
+    instant_eval_rollbacks = 0
     stagnation_counter = 0
     STAGNATION_THRESHOLD = 15000  # episodes without meaningful improvement before rollback
     STAGNATION_TOLERANCE = 0.9   # tolerate avg200 down to 90% of best before counting as stagnation
@@ -191,6 +284,19 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     rollback_eps_mult = float(rollback_eps_mult)
     rollback_eps_min = float(rollback_eps_min)
     rollback_eps_max = max(rollback_eps_min, float(rollback_eps_max))
+    eval_every = max(0, int(eval_every))
+    eval_episodes = max(1, int(eval_episodes))
+    eval_max_steps = max_steps if eval_max_steps is None else max(1, int(eval_max_steps))
+    eval_seed = int(eval_seed)
+    instant_eval_drop_ratio = float(instant_eval_drop_ratio)
+    if not (0.0 <= instant_eval_drop_ratio < 1.0):
+        raise ValueError('instant_eval_drop_ratio must be in [0.0, 1.0)')
+    rollback_source = str(rollback_source).lower()
+    if rollback_source not in ('auto', 'avg200', 'eval'):
+        raise ValueError('rollback_source must be one of: auto, avg200, eval')
+    scheduler_source = str(scheduler_source).lower()
+    if scheduler_source not in ('auto', 'avg200', 'eval'):
+        raise ValueError('scheduler_source must be one of: auto, avg200, eval')
     scheduler_eps_gate = max(0.02, agent.eps_min * 2.0)
     eps_hold_until_ep = -1
     eps_hold_floor = 0.0
@@ -258,10 +364,37 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                         stagnation_counter += 1
 
                     if (stagnation_counter >= STAGNATION_THRESHOLD
-                            and agent.eps < ROLLBACK_EPS_THRESHOLD
-                            and os.path.isfile(best_ckpt_path)):
+                            and agent.eps < ROLLBACK_EPS_THRESHOLD):
+                        candidates = []
+                        if rollback_source == 'avg200':
+                            candidates = [
+                                (best_ckpt_path, f'avg200={best_avg200:.2f}'),
+                            ]
+                        elif rollback_source == 'eval':
+                            candidates = [
+                                (best_eval_ckpt_path, f'eval_avg={best_eval_avg:.2f}'),
+                                (best_ckpt_path, f'avg200 fallback={best_avg200:.2f}'),
+                            ]
+                        else:  # auto
+                            candidates = [
+                                (best_eval_ckpt_path, f'eval_avg={best_eval_avg:.2f}'),
+                                (best_ckpt_path, f'avg200 fallback={best_avg200:.2f}'),
+                            ]
+
+                        rollback_path = None
+                        rollback_metric = 'n/a'
+                        for path, metric_desc in candidates:
+                            if os.path.isfile(path):
+                                rollback_path = path
+                                rollback_metric = metric_desc
+                                break
+
+                        if rollback_path is None:
+                            stagnation_counter = 0
+                            continue
+
                         old_eps = agent.eps
-                        agent.load(best_ckpt_path)
+                        agent.load(rollback_path)
 
                         # Adaptive exploration boost after rollback.
                         new_eps = min(max(old_eps * rollback_eps_mult, rollback_eps_min), rollback_eps_max)
@@ -281,7 +414,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
                         stagnation_counter = 0
                         print(
-                            f'  >> ROLLBACK to best (avg200={best_avg200:.1f}) at ep {ep_counter} | '
+                            f'  >> ROLLBACK to {os.path.basename(rollback_path)} '
+                            f'({rollback_metric}) at ep {ep_counter} | '
                             f'eps: {old_eps:.4f}->{agent.eps:.4f} | '
                             f'eps_floor={eps_hold_floor:.4f} for next {rollback_eps_hold_episodes} eps'
                         )
@@ -296,7 +430,10 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                         rewards=np.array(all_rewards, dtype=np.float16),
                         steps=np.array(all_steps, dtype=np.uint16),
                         losses=np.array(recent_losses, dtype=np.float32),
-                        qvals=np.array(recent_qvals, dtype=np.float32))
+                        qvals=np.array(recent_qvals, dtype=np.float32),
+                        eval_eps=np.array(eval_points, dtype=np.int32),
+                        eval_scores=np.array(eval_avg_scores, dtype=np.float32),
+                        eval_steps=np.array(eval_avg_steps, dtype=np.float32))
 
                 if ep_counter % 1000 == 0 or ep_counter == 1:
                     elapsed = time.time() - t_start
@@ -319,7 +456,65 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                     # LR scheduler is meaningful only when epsilon is already low.
                     # During high exploration, score variance is too high for reliable LR decisions.
                     if agent.eps <= scheduler_eps_gate:
-                        agent.step_scheduler(best_avg200)
+                        scheduler_metric = best_avg200
+                        if scheduler_source in ('eval', 'auto') and latest_eval_score is not None:
+                            scheduler_metric = latest_eval_score
+                        agent.step_scheduler(scheduler_metric)
+
+                # Deterministic policy check (eps=0 + action mask ON) for deployment-quality selection.
+                if eval_every > 0 and ep_counter % eval_every == 0:
+                    eval_round_idx = ep_counter // eval_every
+                    eval_score, eval_steps = _run_deterministic_eval(eval_round_idx)
+                    eval_points.append(ep_counter)
+                    eval_avg_scores.append(eval_score)
+                    eval_avg_steps.append(eval_steps)
+                    latest_eval_score = eval_score
+
+                    if eval_score > best_eval_avg:
+                        best_eval_avg = eval_score
+                        agent.save(best_eval_ckpt_path)
+                        eval_status = 'new best_eval'
+                    else:
+                        eval_status = f'best_eval={best_eval_avg:.2f}'
+
+                    # Safety fuse: instant rollback if eval collapses by configured ratio.
+                    drop_limit = best_eval_avg * (1.0 - instant_eval_drop_ratio)
+                    if (
+                            instant_eval_drop_ratio > 0.0
+                            and best_eval_avg > 0.0
+                            and eval_score < drop_limit
+                            and os.path.isfile(best_eval_ckpt_path)
+                    ):
+                        old_eps = agent.eps
+                        agent.load(best_eval_ckpt_path)
+
+                        # Keep rollback behavior consistent with stagnation rollback.
+                        new_eps = min(max(old_eps * rollback_eps_mult, rollback_eps_min), rollback_eps_max)
+                        agent.eps = new_eps
+                        if rollback_eps_hold_episodes > 0:
+                            eps_hold_floor = max(rollback_eps_min, new_eps * 0.60)
+                            eps_hold_until_ep = ep_counter + rollback_eps_hold_episodes
+
+                        for param_group in agent.optimizer.param_groups:
+                            param_group['lr'] = base_lr
+
+                        agent.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                            agent.optimizer, mode='max', factor=0.5,
+                            patience=scheduler_patience, min_lr=1e-5
+                        )
+
+                        latest_eval_score = best_eval_avg
+                        stagnation_counter = 0
+                        instant_eval_rollbacks += 1
+                        eval_status = (
+                            f'instant rollback (eval {eval_score:.2f} < {drop_limit:.2f}) | '
+                            f'best_eval={best_eval_avg:.2f}'
+                        )
+
+                    print(
+                        f'  >> eval@{ep_counter}: avg_score={eval_score:.2f} '
+                        f'avg_steps={eval_steps:.1f} | {eval_status}'
+                    )
 
                 if ep_counter % save_every == 0:
                     agent.save(os.path.join(log_dir, f'model_ep{ep_counter}.pth'))
@@ -347,15 +542,34 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         rewards=np.array(all_rewards, dtype=np.float16),
         steps=np.array(all_steps, dtype=np.uint16),
         losses=np.array(recent_losses, dtype=np.float32),
-        qvals=np.array(recent_qvals, dtype=np.float32))
+        qvals=np.array(recent_qvals, dtype=np.float32),
+        eval_eps=np.array(eval_points, dtype=np.int32),
+        eval_scores=np.array(eval_avg_scores, dtype=np.float32),
+        eval_steps=np.array(eval_avg_steps, dtype=np.float32))
     agent.save(os.path.join(log_dir, save_path))
     agent.save(save_path)
-    print(f'Done. Best score: {best_score}. Model saved to {save_path}')
+    if eval_points:
+        print(
+            f'Done. Best score: {best_score}. '
+            f'Best eval avg score: {best_eval_avg:.2f}. '
+            f'Model saved to {save_path}'
+        )
+    else:
+        print(f'Done. Best score: {best_score}. Model saved to {save_path}')
 
     try:
         run_info = os.path.join(log_dir, 'run_info.txt')
         with open(run_info, 'w', encoding='utf-8') as ri:
             ri.write(f'best_score: {best_score}\n')
+            ri.write(f'best_avg200: {best_avg200:.6f}\n')
+            ri.write(f'instant_eval_drop_ratio: {instant_eval_drop_ratio:.6f}\n')
+            ri.write(f'instant_eval_rollbacks: {instant_eval_rollbacks}\n')
+            ri.write(f'rollback_source: {rollback_source}\n')
+            ri.write(f'scheduler_source: {scheduler_source}\n')
+            if eval_points:
+                ri.write(f'best_eval_avg_score: {best_eval_avg:.6f}\n')
+                ri.write(f'best_eval_path: {best_eval_ckpt_path}\n')
+                ri.write(f'eval_points: {len(eval_points)}\n')
             ri.write(f'final_eps: {agent.eps:.6f}\n')
             ri.write(f'final_lr: {agent.optimizer.param_groups[0]["lr"]:.1e}\n')
             ri.write(f'total_time: {time.time() - t_start:.1f}s\n')
@@ -374,7 +588,7 @@ if __name__ == '__main__':
     parser.add_argument('--save', type=str, default='model.pth', help='Final model filename')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
     parser.add_argument('--num-envs', type=int, default=128, help='Parallel environments (e.g. 64-128)')
-    parser.add_argument('--agent', type=str, default='dqn', choices=['dqn', 'cnn'],
+    parser.add_argument('--agent', type=str, default='cnn', choices=['dqn', 'cnn'],
                         help='Agent type: dqn (feature vector) or cnn (grid observation)')
     parser.add_argument('--simple-rewards', action='store_true',
                         help='Use simplified reward: +10 food, -10 death, -0.01 step')
@@ -409,6 +623,24 @@ if __name__ == '__main__':
                         help='Maximum epsilon after rollback boost')
     parser.add_argument('--rollback-eps-hold', type=int, default=3000,
                         help='Hold temporary epsilon floor for this many episodes after rollback')
+    parser.add_argument('--eval-every', type=int, default=5000,
+                        help='Run deterministic eval every N episodes (0 disables)')
+    parser.add_argument('--eval-episodes', type=int, default=20,
+                        help='Episodes per deterministic eval checkpoint test')
+    parser.add_argument('--eval-max-steps', type=int, default=None,
+                        help='Max steps per deterministic eval episode (default: --max-steps)')
+    parser.add_argument('--eval-seed', type=int, default=12345,
+                        help='Base seed for deterministic eval reproducibility')
+    parser.add_argument('--instant-eval-drop-ratio', type=float, default=0.50,
+                        help='Instant rollback when eval drops by this fraction from best_eval (0 disables)')
+    parser.add_argument('--walls', action='store_true',
+                        help='Enable layout fine-tuning autotuning (requires --level)')
+    parser.add_argument('--rollback-source', type=str, default='auto',
+                        choices=['auto', 'avg200', 'eval'],
+                        help='Checkpoint source used for rollback: avg200, eval, or auto')
+    parser.add_argument('--scheduler-source', type=str, default='auto',
+                        choices=['auto', 'avg200', 'eval'],
+                        help='Metric source for LR scheduler: avg200, eval, or auto')
     parser.add_argument('--v12-from-scratch', action='store_true',
                         help='Apply recommended V12 config for training from scratch')
     parser.add_argument('--fresh', action='store_true',
@@ -455,6 +687,43 @@ if __name__ == '__main__':
             args.resume_eps_max = 0.12
             print('Note: --v12-from-scratch + --init-checkpoint detected; enabling resume epsilon boost.')
 
+    if args.walls:
+        if not args.level:
+            parser.error('--walls requires --level <layout.json>.')
+        if not os.path.isfile(args.level):
+            parser.error(f'--walls level file not found: {args.level}')
+
+        map_walls = _load_walls(args.level, args.board_size)
+        wall_count = len(map_walls)
+        total_cells = max(1, args.board_size * args.board_size)
+        free_ratio = max(1, total_cells - wall_count) / float(total_cells)
+
+        if args.eps_start is None and args.init_checkpoint:
+            args.eps_start = 0.05
+        if args.eval_episodes == parser.get_default('eval_episodes'):
+            args.eval_episodes = 50
+        if args.rollback_source == parser.get_default('rollback_source'):
+            args.rollback_source = 'eval'
+        if args.scheduler_source == parser.get_default('scheduler_source'):
+            args.scheduler_source = 'eval'
+        if args.log_name is None:
+            args.log_name = 'walls'
+
+        if args.reward_switch_start == parser.get_default('reward_switch_start'):
+            args.reward_switch_start = max(0.02, min(0.95, args.reward_switch_start * free_ratio))
+        if args.reward_switch_end == parser.get_default('reward_switch_end'):
+            args.reward_switch_end = max(
+                args.reward_switch_start + 0.02,
+                min(1.0, args.reward_switch_end * free_ratio),
+            )
+
+        print(
+            f'Walls mode: {wall_count} walls ({(100.0 * wall_count / total_cells):.1f}% blocked) | '
+            f'reward_switch={args.reward_switch_start:.2f}->{args.reward_switch_end:.2f} | '
+            f'eval_episodes={args.eval_episodes} | '
+            f'rollback={args.rollback_source} scheduler={args.scheduler_source}'
+        )
+
     train(
         episodes=args.episodes,
         max_steps=args.max_steps,
@@ -483,4 +752,12 @@ if __name__ == '__main__':
         rollback_eps_min=args.rollback_eps_min,
         rollback_eps_max=args.rollback_eps_max,
         rollback_eps_hold_episodes=args.rollback_eps_hold,
+        eval_every=args.eval_every,
+        eval_episodes=args.eval_episodes,
+        eval_max_steps=args.eval_max_steps,
+        eval_seed=args.eval_seed,
+        rollback_source=args.rollback_source,
+        scheduler_source=args.scheduler_source,
+        walls_mode=args.walls,
+        instant_eval_drop_ratio=args.instant_eval_drop_ratio,
     )

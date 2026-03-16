@@ -367,10 +367,17 @@ class SnakeGameAI:
 
         if complex_active:
             # Space awareness penalty: avoid entering tight regions.
-            if reachable_ratio < 0.2:
-                complex_reward -= 0.3
+            if reachable_ratio < 0.15:
+                complex_reward -= 0.45
+            elif reachable_ratio < 0.25:
+                complex_reward -= 0.22
             elif reachable_ratio < 0.4:
                 complex_reward -= 0.1
+
+            # High-occupancy anti-trap: keep a viable path from head to tail.
+            if occupancy >= 0.25 and len(self.snake) > 6 and not self._has_head_to_tail_path():
+                trap_penalty = 0.20 + 0.60 * occupancy
+                complex_reward -= trap_penalty
 
             # Hunger penalty (complex branch).
             hunger_threshold = self.board_blocks * 2 + len(self.snake)
@@ -380,7 +387,7 @@ class SnakeGameAI:
 
             # Anti-loop penalty to discourage short cyclic trajectories.
             if self.head in self._recent_set:
-                loop_penalty = 0.3 + 0.2 * (len(self.snake) / (self.board_blocks ** 2))
+                loop_penalty = 0.35 + 0.30 * occupancy
                 complex_reward -= loop_penalty
 
             self._recent_positions.append(self.head)
@@ -591,6 +598,44 @@ class SnakeGameAI:
             return True
         if self.walls and (cx, cy) in self.walls:
             return True
+        return False
+
+    def _has_head_to_tail_path(self):
+        """Return True if the current head can still reach the tail cell.
+
+        The tail is treated as passable because it can move away on the next
+        transition. Breaking this connectivity at high occupancy often creates
+        irreversible traps, so we penalize such states in complex reward mode.
+        """
+        if len(self.snake) <= 1:
+            return True
+
+        bb = self.board_blocks
+        tail = self.snake[-1]
+        blocked = set(self.snake_body_set)
+        blocked.discard(tail)
+        walls = self.walls
+
+        visited = {self.head}
+        queue = deque([self.head])
+        while queue:
+            cx, cy = queue.popleft()
+            if (cx, cy) == tail:
+                return True
+
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = cx + dx, cy + dy
+                if (nx, ny) in visited:
+                    continue
+                if nx < 0 or nx >= bb or ny < 0 or ny >= bb:
+                    continue
+                if walls and (nx, ny) in walls:
+                    continue
+                if (nx, ny) in blocked:
+                    continue
+                visited.add((nx, ny))
+                queue.append((nx, ny))
+
         return False
 
     def _flood_fill_ratio(self, extra_block=None):

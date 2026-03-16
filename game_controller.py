@@ -20,9 +20,12 @@ def run_cli(argv=None):
     """Run the interactive Snake GUI controller from command line arguments."""
     parser = argparse.ArgumentParser(description='Run SnakeGameAI example')
     parser.add_argument('--no-render', action='store_true', help='Run without opening a window')
+    parser.add_argument('--eval-seed', type=int, default=None,
+                        help='Base seed for deterministic visualization episodes')
     args = parser.parse_args(argv)
 
     g = SnakeGameAI(render=not args.no_render)
+    viz_seed = args.eval_seed
     print(f'Starting game (render={g.render})...')
 
     if not g.render:
@@ -143,19 +146,37 @@ def run_cli(argv=None):
 
             return _pygame_file_picker(fallback_exts, fallback_dirs, fallback_title)
 
-    def visualize_agent(env, max_episodes=10000, max_steps=MAX_EPISODE_MOVES, init_ckpt=None):
+    def visualize_agent(
+            env,
+            max_episodes=10000,
+            max_steps=MAX_EPISODE_MOVES,
+            init_ckpt=None,
+            seed_base=None):
         """Run evaluation-only visualization loop for a loaded checkpoint."""
         import torch as torch_mod
 
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+
         agent = None
         agent_type = 'dqn'
+        ckpt_board_size = None
         if init_ckpt:
             try:
                 data = torch_mod.load(init_ckpt, map_location='cpu', weights_only=False)
-                if isinstance(data, dict) and 'board_size' in data:
-                    agent_type = 'cnn'
+                if isinstance(data, dict):
+                    if 'board_size' in data:
+                        agent_type = 'cnn'
+                        ckpt_board_size = int(data['board_size'])
             except Exception:
                 pass
+
+        if ckpt_board_size and ckpt_board_size != env.board_blocks:
+            env.board_blocks = ckpt_board_size
+            env.layout_cfg['board_blocks'] = ckpt_board_size
+            env._recompute_layout()
 
         if agent_type == 'cnn':
             from cnn_agent import CNNAgent
@@ -216,15 +237,17 @@ def run_cli(argv=None):
             return f'Q[S,R,L]: {q_vals[0]:.2f}, {q_vals[1]:.2f}, {q_vals[2]:.2f}'
 
         def choose_action_with_debug(cur_state):
+            action_mask = env.get_safe_action_mask()
             try:
                 with torch_mod.no_grad():
                     st = torch_mod.as_tensor(cur_state, dtype=torch_mod.float32).unsqueeze(0).to(device)
                     q_out = agent.policy_net(st).squeeze(0).cpu().tolist()
                 q_values = [float(v) for v in q_out]
-                best = int(max(range(len(q_values)), key=lambda i: q_values[i]))
+                masked_q = [q if action_mask[i] else -1e9 for i, q in enumerate(q_values)]
+                best = int(max(range(len(masked_q)), key=lambda i: masked_q[i]))
                 return best, q_values
             except Exception:
-                return agent.act(cur_state), None
+                return agent.act(cur_state, action_mask=action_mask), None
 
         def _wait_for_resume(
                 env,
@@ -315,6 +338,19 @@ def run_cli(argv=None):
         running = True
         while running and ep < max_episodes:
             ep += 1
+
+            if seed_base is not None:
+                seed_val = int(seed_base) + ep
+                random.seed(seed_val)
+                if np is not None:
+                    np.random.seed(seed_val & 0xFFFFFFFF)
+                try:
+                    torch_mod.manual_seed(seed_val)
+                    if torch_mod.cuda.is_available():
+                        torch_mod.cuda.manual_seed_all(seed_val)
+                except Exception:
+                    pass
+
             state = env.reset()
             total_reward = 0.0
             paused = False
@@ -603,9 +639,20 @@ def run_cli(argv=None):
 
         elif choice == '2':
             sub_w = 460
-            sub_h = 300
-            board_size_str = str(g.board_blocks)
+            sub_h = 350
+            ckpt_board_size = None
+            if g.current_checkpoint_path:
+                try:
+                    import torch as torch_mod
+                    data = torch_mod.load(g.current_checkpoint_path, map_location='cpu', weights_only=False)
+                    if isinstance(data, dict) and 'board_size' in data:
+                        ckpt_board_size = int(data['board_size'])
+                except Exception:
+                    ckpt_board_size = None
+
+            board_size_str = str(ckpt_board_size if ckpt_board_size else g.board_blocks)
             bs_cursor = len(board_size_str)
+            use_seed = bool(viz_seed is not None)
             active_input = None
             blink_timer = 0
             submenu = True
@@ -616,6 +663,7 @@ def run_cli(argv=None):
                 sy = g.h // 2 - sub_h // 2
                 sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
                 inp_bs_rect = pygame.Rect(sx + 20, sy + 80, 420, 32)
+                chk_seed_rect = pygame.Rect(sx + 20, sy + 128, 24, 24)
                 btn_start = pygame.Rect(sx + 20, sy + 200, 200, 50)
                 btn_back = pygame.Rect(sx + 240, sy + 200, 200, 50)
 
@@ -630,6 +678,10 @@ def run_cli(argv=None):
                         if inp_bs_rect.collidepoint(mx, my):
                             active_input = 'boardsize'
                             blink_timer = 0
+                        elif chk_seed_rect.collidepoint(mx, my):
+                            if viz_seed is not None:
+                                use_seed = not use_seed
+                            active_input = None
                         elif btn_start.collidepoint(mx, my):
                             active_input = None
                             bsize = max(5, int(board_size_str)) if board_size_str.isdigit() else g.board_blocks
@@ -642,6 +694,7 @@ def run_cli(argv=None):
                                     g,
                                     max_steps=MAX_EPISODE_MOVES,
                                     init_ckpt=g.current_checkpoint_path,
+                                    seed_base=(viz_seed if use_seed else None),
                                 )
                                 info_msg = 'Visualization finished.'
                             except Exception as e:
@@ -694,6 +747,31 @@ def run_cli(argv=None):
                     cursor_x = inp_bs_rect.x + 6 + status_font.size(board_size_str[:bs_cursor])[0]
                     pygame.draw.line(g.display, WHITE, (cursor_x, inp_bs_rect.y + 4), (cursor_x, inp_bs_rect.bottom - 4))
 
+                chk_border = (150, 150, 150)
+                chk_fill = (40, 40, 40)
+                if viz_seed is None:
+                    chk_fill = (28, 28, 28)
+                    chk_border = (90, 90, 90)
+                pygame.draw.rect(g.display, chk_fill, chk_seed_rect)
+                pygame.draw.rect(g.display, chk_border, chk_seed_rect, 2)
+                if use_seed and viz_seed is not None:
+                    pygame.draw.line(
+                        g.display, WHITE,
+                        (chk_seed_rect.x + 5, chk_seed_rect.y + 12),
+                        (chk_seed_rect.x + 10, chk_seed_rect.y + 18), 2)
+                    pygame.draw.line(
+                        g.display, WHITE,
+                        (chk_seed_rect.x + 10, chk_seed_rect.y + 18),
+                        (chk_seed_rect.x + 19, chk_seed_rect.y + 6), 2)
+                seed_label = (
+                    f'Use --eval-seed in visualization ({viz_seed})'
+                    if viz_seed is not None
+                    else 'Use --eval-seed in visualization (not provided)'
+                )
+                seed_color = WHITE if viz_seed is not None else (150, 150, 150)
+                seed_surf = status_font.render(seed_label, True, seed_color)
+                g.display.blit(seed_surf, (chk_seed_rect.right + 8, chk_seed_rect.y + 1))
+
                 level_status = (
                     f'Level: {g.current_level_name}'
                     if g.current_level_name
@@ -704,7 +782,7 @@ def run_cli(argv=None):
                     if g.current_checkpoint_path
                     else 'No checkpoint loaded'
                 )
-                info_y = sy + 130
+                info_y = sy + 168
                 for line in [level_status, ckpt_status]:
                     clipped = g._fit_text(line, status_font, sub_w - 24)
                     surf = status_font.render(clipped, True, WHITE)

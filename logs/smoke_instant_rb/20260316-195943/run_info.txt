@@ -1,0 +1,12 @@
+best_score: 1
+best_avg200: 0.000000
+instant_eval_drop_ratio: 0.010000
+instant_eval_rollbacks: 0
+rollback_source: auto
+scheduler_source: auto
+best_eval_avg_score: 0.500000
+best_eval_path: logs\smoke_instant_rb\20260316-195943\best_eval.pth
+eval_points: 3
+final_eps: 0.955418
+final_lr: 1.0e-03
+total_time: 1.0s
