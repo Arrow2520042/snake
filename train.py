@@ -51,7 +51,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           eval_max_steps=None, eval_seed=12345,
           rollback_source='auto', scheduler_source='auto',
           walls_mode=False,
-          instant_eval_drop_ratio=0.50):
+          instant_eval_drop_ratio=0.50,
+          npz_save_every=2000):
     """Main training orchestrator.
 
     Responsibilities in this function:
@@ -84,6 +85,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     resume_eps_mult = float(resume_eps_mult)
     resume_eps_min = float(resume_eps_min)
     resume_eps_max = max(resume_eps_min, float(resume_eps_max))
+    npz_save_every = max(1, int(npz_save_every))
 
     # 2) Optional checkpoint restore for resume/fine-tuning workflows.
     if init_checkpoint and os.path.isfile(init_checkpoint):
@@ -107,7 +109,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     if eps_decay is not None:
         agent.eps_decay = float(eps_decay)
 
-    base_lr = float(agent.optimizer.defaults.get('lr', agent.optimizer.param_groups[0]['lr']))
+    # Keep rollback LR aligned with the loaded checkpoint state (or explicit override),
+    # not with Adam's constructor default.
+    base_lr = float(agent.optimizer.param_groups[0]['lr'])
     scheduler_patience = 10 if agent_type == 'cnn' else 50
 
     walls = None
@@ -233,6 +237,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'init_checkpoint: {init_checkpoint}\n')
             fi.write(f'episodes: {episodes}\n')
             fi.write(f'max_steps: {max_steps}\n')
+            fi.write(f'npz_save_every: {npz_save_every}\n')
             fi.write(f'board_size: {board_size}\n')
             fi.write(f'walls_mode: {bool(walls_mode)}\n')
             fi.write(f'wall_count: {wall_count}\n')
@@ -263,7 +268,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         pass
 
     print(f'Training {episodes} episodes | board={board_size} | '
-          f'envs={num_envs} | updates/round={max(1, num_envs // 16)} | logs -> {log_dir}')
+            f'envs={num_envs} | updates/round={max(1, num_envs // 16)} | '
+            f'npz_every={npz_save_every} | logs -> {log_dir}')
 
     best_score = 0
     METRIC_WINDOW = 200
@@ -424,7 +430,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 all_rewards.append(ep_reward)
                 all_steps.append(steps_acc[i])
 
-                if ep_counter % 500 == 0:
+                if ep_counter % npz_save_every == 0:
                     np.savez_compressed(log_path,
                         scores=np.array(all_scores, dtype=np.int16),
                         rewards=np.array(all_rewards, dtype=np.float16),
@@ -582,6 +588,8 @@ if __name__ == '__main__':
     parser.add_argument('--episodes', type=int, default=1000)
     parser.add_argument('--max-steps', type=int, default=15000)
     parser.add_argument('--save-every', type=int, default=10000)
+    parser.add_argument('--npz-save-every', type=int, default=2000,
+                        help='Flush rewards.npz every N episodes (higher reduces I/O overhead)')
     parser.add_argument('--level', type=str, default=None, help='Path to level JSON')
     parser.add_argument('--init-checkpoint', type=str, default=None, help='Path to .pth to resume')
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')
@@ -728,6 +736,7 @@ if __name__ == '__main__':
         episodes=args.episodes,
         max_steps=args.max_steps,
         save_every=args.save_every,
+        npz_save_every=args.npz_save_every,
         level_path=args.level,
         init_checkpoint=args.init_checkpoint,
         log_name=args.log_name,

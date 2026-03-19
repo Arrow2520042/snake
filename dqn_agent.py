@@ -282,30 +282,31 @@ class DQNAgent:
         n = len(states)
         self.steps += n
         masks = self._normalize_action_masks(action_masks, n)
-        rands = np.random.random(n)
-        explore_mask = rands < self.eps
-        if masks is None:
-            random_actions = np.random.randint(0, self.n_actions, size=n)
-        else:
-            random_actions = np.empty(n, dtype=np.int64)
-            for i in range(n):
-                valid = np.flatnonzero(masks[i])
-                random_actions[i] = int(np.random.choice(valid))
+        explore_mask = np.random.random(n) < self.eps
+        actions = np.empty(n, dtype=np.int64)
+
+        # Sample random actions only for exploring environments.
+        if explore_mask.any():
+            explore_indices = np.flatnonzero(explore_mask)
+            if masks is None:
+                actions[explore_indices] = np.random.randint(0, self.n_actions, size=explore_indices.size)
+            else:
+                for i in explore_indices:
+                    valid = np.flatnonzero(masks[i])
+                    actions[i] = int(np.random.choice(valid))
 
         if explore_mask.all():
-            return random_actions
+            return actions
 
         with torch.no_grad():
-            batch = torch.as_tensor(np.array(states), dtype=torch.float32).to(self.device)
+            batch = torch.as_tensor(np.asarray(states, dtype=np.float32), dtype=torch.float32, device=self.device)
             q_values = self.policy_net(batch)
-            if masks is None:
-                greedy_actions = q_values.argmax(dim=1).cpu().numpy()
-            else:
-                q_np = q_values.detach().cpu().numpy()
-                masked_q = np.where(masks, q_np, -1e9)
-                greedy_actions = masked_q.argmax(axis=1)
+            if masks is not None:
+                mask_t = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
+                q_values = q_values.masked_fill(~mask_t, torch.finfo(q_values.dtype).min)
+            greedy_actions = q_values.argmax(dim=1).detach().cpu().numpy()
 
-        actions = np.where(explore_mask, random_actions, greedy_actions)
+        actions[~explore_mask] = greedy_actions[~explore_mask]
         return actions
 
     def push(self, env_id, state, action, reward, next_state, done, snake_length=None):
