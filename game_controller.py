@@ -25,7 +25,6 @@ def run_cli(argv=None):
     args = parser.parse_args(argv)
 
     g = SnakeGameAI(render=not args.no_render)
-    viz_seed = args.eval_seed
     print(f'Starting game (render={g.render})...')
 
     if not g.render:
@@ -66,15 +65,46 @@ def run_cli(argv=None):
         except Exception:
             pass
 
+    def _parse_int_or_none(value):
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _detect_eval_seed_from_checkpoint(ckpt_path):
+        """Try to infer eval_seed from sibling info.txt next to a checkpoint."""
+        if not ckpt_path or not os.path.isfile(ckpt_path):
+            return None
+        info_path = os.path.join(os.path.dirname(ckpt_path), 'info.txt')
+        if not os.path.isfile(info_path):
+            return None
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line.lower().startswith('eval_seed:'):
+                        continue
+                    val = line.split(':', 1)[1].strip()
+                    return _parse_int_or_none(val)
+        except Exception:
+            return None
+        return None
+
     g.current_level_name = None
     g.current_level_path = None
     g.current_checkpoint_path = None
     sess = _load_session_cfg()
+    viz_seed = args.eval_seed if args.eval_seed is not None else _parse_int_or_none(sess.get('eval_seed'))
     if sess.get('level_path') and os.path.isfile(sess['level_path']):
         g.current_level_path = sess['level_path']
         g.current_level_name = os.path.basename(sess['level_path'])
     if sess.get('checkpoint_path') and os.path.isfile(sess['checkpoint_path']):
         g.current_checkpoint_path = sess['checkpoint_path']
+        if viz_seed is None:
+            detected_seed = _detect_eval_seed_from_checkpoint(g.current_checkpoint_path)
+            if detected_seed is not None:
+                viz_seed = detected_seed
+                _save_session_cfg(eval_seed=viz_seed)
 
     def pick_file_dialog(
             filetypes,
@@ -613,8 +643,14 @@ def run_cli(argv=None):
             )
             if path:
                 g.current_checkpoint_path = path
-                _save_session_cfg(checkpoint_path=path)
-                info_msg = f'Checkpoint: {os.path.basename(path)}'
+                detected_seed = _detect_eval_seed_from_checkpoint(path)
+                if args.eval_seed is None and detected_seed is not None:
+                    viz_seed = detected_seed
+                _save_session_cfg(checkpoint_path=path, eval_seed=viz_seed)
+                if detected_seed is not None:
+                    info_msg = f'Checkpoint: {os.path.basename(path)} | eval_seed={detected_seed}'
+                else:
+                    info_msg = f'Checkpoint: {os.path.basename(path)}'
             else:
                 info_msg = 'No checkpoint selected.'
             notif_msg = info_msg
@@ -764,9 +800,9 @@ def run_cli(argv=None):
                         (chk_seed_rect.x + 10, chk_seed_rect.y + 18),
                         (chk_seed_rect.x + 19, chk_seed_rect.y + 6), 2)
                 seed_label = (
-                    f'Use --eval-seed in visualization ({viz_seed})'
+                    f'Deterministic eval seed: {viz_seed}'
                     if viz_seed is not None
-                    else 'Use --eval-seed in visualization (not provided)'
+                    else 'Deterministic eval seed: not available'
                 )
                 seed_color = WHITE if viz_seed is not None else (150, 150, 150)
                 seed_surf = status_font.render(seed_label, True, seed_color)
