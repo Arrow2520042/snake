@@ -71,24 +71,59 @@ def run_cli(argv=None):
         except Exception:
             return None
 
-    def _detect_eval_seed_from_checkpoint(ckpt_path):
-        """Try to infer eval_seed from sibling info.txt next to a checkpoint."""
-        if not ckpt_path or not os.path.isfile(ckpt_path):
-            return None
-        info_path = os.path.join(os.path.dirname(ckpt_path), 'info.txt')
-        if not os.path.isfile(info_path):
+    def _extract_eval_seed_from_metadata(meta_path):
+        if not meta_path or not os.path.isfile(meta_path):
             return None
         try:
-            with open(info_path, 'r', encoding='utf-8') as f:
+            with open(meta_path, 'r', encoding='utf-8') as f:
                 for raw in f:
                     line = raw.strip()
-                    if not line.lower().startswith('eval_seed:'):
+                    if not line:
                         continue
-                    val = line.split(':', 1)[1].strip()
+                    low = line.lower()
+                    if not low.startswith('eval_seed'):
+                        continue
+                    if ':' in line:
+                        val = line.split(':', 1)[1].strip()
+                    elif '=' in line:
+                        val = line.split('=', 1)[1].strip()
+                    else:
+                        parts = line.split()
+                        val = parts[-1] if len(parts) > 1 else ''
                     return _parse_int_or_none(val)
         except Exception:
             return None
         return None
+
+    def _detect_eval_seed_from_checkpoint(ckpt_path):
+        """Infer eval_seed from nearest run metadata for the selected checkpoint."""
+        if not ckpt_path or not os.path.isfile(ckpt_path):
+            return None, None
+
+        candidate_dirs = [os.path.dirname(ckpt_path)]
+        ws_root = os.path.dirname(os.path.abspath(__file__))
+        logs_dir = os.path.join(ws_root, 'logs')
+        ckpt_name = os.path.basename(ckpt_path)
+        if os.path.isdir(logs_dir):
+            try:
+                for root_dir, _, files in os.walk(logs_dir):
+                    if ckpt_name in files:
+                        candidate_dirs.append(root_dir)
+            except Exception:
+                pass
+
+        seen = set()
+        for cand_dir in candidate_dirs:
+            norm = os.path.normcase(os.path.abspath(cand_dir))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            for meta_name in ('info.txt', 'run_info.txt'):
+                meta_path = os.path.join(cand_dir, meta_name)
+                seed = _extract_eval_seed_from_metadata(meta_path)
+                if seed is not None:
+                    return seed, meta_path
+        return None, None
 
     g.current_level_name = None
     g.current_level_path = None
@@ -101,7 +136,7 @@ def run_cli(argv=None):
     if sess.get('checkpoint_path') and os.path.isfile(sess['checkpoint_path']):
         g.current_checkpoint_path = sess['checkpoint_path']
         if viz_seed is None:
-            detected_seed = _detect_eval_seed_from_checkpoint(g.current_checkpoint_path)
+            detected_seed, _ = _detect_eval_seed_from_checkpoint(g.current_checkpoint_path)
             if detected_seed is not None:
                 viz_seed = detected_seed
                 _save_session_cfg(eval_seed=viz_seed)
@@ -643,12 +678,15 @@ def run_cli(argv=None):
             )
             if path:
                 g.current_checkpoint_path = path
-                detected_seed = _detect_eval_seed_from_checkpoint(path)
+                detected_seed, seed_source = _detect_eval_seed_from_checkpoint(path)
                 if args.eval_seed is None and detected_seed is not None:
                     viz_seed = detected_seed
                 _save_session_cfg(checkpoint_path=path, eval_seed=viz_seed)
                 if detected_seed is not None:
-                    info_msg = f'Checkpoint: {os.path.basename(path)} | eval_seed={detected_seed}'
+                    info_msg = (
+                        f'Checkpoint: {os.path.basename(path)} | '
+                        f'eval_seed={detected_seed} ({os.path.basename(seed_source)})'
+                    )
                 else:
                     info_msg = f'Checkpoint: {os.path.basename(path)}'
             else:
@@ -675,7 +713,7 @@ def run_cli(argv=None):
 
         elif choice == '2':
             sub_w = 460
-            sub_h = 350
+            sub_h = 430
             ckpt_board_size = None
             if g.current_checkpoint_path:
                 try:
@@ -688,6 +726,8 @@ def run_cli(argv=None):
 
             board_size_str = str(ckpt_board_size if ckpt_board_size else g.board_blocks)
             bs_cursor = len(board_size_str)
+            seed_str = '' if viz_seed is None else str(viz_seed)
+            seed_cursor = len(seed_str)
             use_seed = bool(viz_seed is not None)
             active_input = None
             blink_timer = 0
@@ -699,9 +739,13 @@ def run_cli(argv=None):
                 sy = g.h // 2 - sub_h // 2
                 sub_rect = pygame.Rect(sx, sy, sub_w, sub_h)
                 inp_bs_rect = pygame.Rect(sx + 20, sy + 80, 420, 32)
-                chk_seed_rect = pygame.Rect(sx + 20, sy + 128, 24, 24)
-                btn_start = pygame.Rect(sx + 20, sy + 200, 200, 50)
-                btn_back = pygame.Rect(sx + 240, sy + 200, 200, 50)
+                inp_seed_rect = pygame.Rect(sx + 20, sy + 172, 420, 32)
+                chk_seed_rect = pygame.Rect(sx + 20, sy + 220, 24, 24)
+                btn_start = pygame.Rect(sx + 20, sy + 338, 200, 50)
+                btn_back = pygame.Rect(sx + 240, sy + 338, 200, 50)
+                seed_value = _parse_int_or_none(seed_str)
+                if seed_value is None:
+                    use_seed = False
 
                 for ev in pygame.event.get():
                     if ev.type == pygame.QUIT:
@@ -714,8 +758,11 @@ def run_cli(argv=None):
                         if inp_bs_rect.collidepoint(mx, my):
                             active_input = 'boardsize'
                             blink_timer = 0
+                        elif inp_seed_rect.collidepoint(mx, my):
+                            active_input = 'seed'
+                            blink_timer = 0
                         elif chk_seed_rect.collidepoint(mx, my):
-                            if viz_seed is not None:
+                            if seed_value is not None:
                                 use_seed = not use_seed
                             active_input = None
                         elif btn_start.collidepoint(mx, my):
@@ -725,14 +772,23 @@ def run_cli(argv=None):
                                 g.board_blocks = bsize
                                 g.layout_cfg['board_blocks'] = bsize
                                 g._recompute_layout()
+                            chosen_seed = _parse_int_or_none(seed_str)
+                            if chosen_seed is not None:
+                                viz_seed = chosen_seed
+                            if chosen_seed is None and not use_seed:
+                                viz_seed = None
+                            _save_session_cfg(eval_seed=viz_seed)
                             try:
                                 visualize_agent(
                                     g,
                                     max_steps=MAX_EPISODE_MOVES,
                                     init_ckpt=g.current_checkpoint_path,
-                                    seed_base=(viz_seed if use_seed else None),
+                                    seed_base=(chosen_seed if use_seed and chosen_seed is not None else None),
                                 )
-                                info_msg = 'Visualization finished.'
+                                if use_seed and chosen_seed is not None:
+                                    info_msg = f'Visualization finished (seed={chosen_seed}).'
+                                else:
+                                    info_msg = 'Visualization finished (seed disabled).'
                             except Exception as e:
                                 info_msg = f'Visualization failed: {e}'
                             submenu = False
@@ -745,26 +801,50 @@ def run_cli(argv=None):
                         blink_timer = 0
                         if ev.key in (pygame.K_ESCAPE, pygame.K_RETURN):
                             active_input = None
-                        elif ev.key == pygame.K_LEFT:
-                            bs_cursor = max(0, bs_cursor - 1)
-                        elif ev.key == pygame.K_RIGHT:
-                            bs_cursor = min(len(board_size_str), bs_cursor + 1)
-                        elif ev.key == pygame.K_HOME:
-                            bs_cursor = 0
-                        elif ev.key == pygame.K_END:
-                            bs_cursor = len(board_size_str)
-                        elif ev.key == pygame.K_BACKSPACE:
-                            if bs_cursor > 0:
-                                board_size_str = board_size_str[:bs_cursor - 1] + board_size_str[bs_cursor:]
-                                bs_cursor -= 1
-                        elif ev.key == pygame.K_DELETE:
-                            if bs_cursor < len(board_size_str):
-                                board_size_str = board_size_str[:bs_cursor] + board_size_str[bs_cursor + 1:]
+                        elif active_input == 'boardsize':
+                            if ev.key == pygame.K_LEFT:
+                                bs_cursor = max(0, bs_cursor - 1)
+                            elif ev.key == pygame.K_RIGHT:
+                                bs_cursor = min(len(board_size_str), bs_cursor + 1)
+                            elif ev.key == pygame.K_HOME:
+                                bs_cursor = 0
+                            elif ev.key == pygame.K_END:
+                                bs_cursor = len(board_size_str)
+                            elif ev.key == pygame.K_BACKSPACE:
+                                if bs_cursor > 0:
+                                    board_size_str = board_size_str[:bs_cursor - 1] + board_size_str[bs_cursor:]
+                                    bs_cursor -= 1
+                            elif ev.key == pygame.K_DELETE:
+                                if bs_cursor < len(board_size_str):
+                                    board_size_str = board_size_str[:bs_cursor] + board_size_str[bs_cursor + 1:]
+                            else:
+                                ch = ev.unicode
+                                if ch and ch.isdigit():
+                                    board_size_str = board_size_str[:bs_cursor] + ch + board_size_str[bs_cursor:]
+                                    bs_cursor += 1
+                        elif active_input == 'seed':
+                            if ev.key == pygame.K_LEFT:
+                                seed_cursor = max(0, seed_cursor - 1)
+                            elif ev.key == pygame.K_RIGHT:
+                                seed_cursor = min(len(seed_str), seed_cursor + 1)
+                            elif ev.key == pygame.K_HOME:
+                                seed_cursor = 0
+                            elif ev.key == pygame.K_END:
+                                seed_cursor = len(seed_str)
+                            elif ev.key == pygame.K_BACKSPACE:
+                                if seed_cursor > 0:
+                                    seed_str = seed_str[:seed_cursor - 1] + seed_str[seed_cursor:]
+                                    seed_cursor -= 1
+                            elif ev.key == pygame.K_DELETE:
+                                if seed_cursor < len(seed_str):
+                                    seed_str = seed_str[:seed_cursor] + seed_str[seed_cursor + 1:]
+                            else:
+                                ch = ev.unicode
+                                if ch and ch.isdigit():
+                                    seed_str = seed_str[:seed_cursor] + ch + seed_str[seed_cursor:]
+                                    seed_cursor += 1
                         else:
-                            ch = ev.unicode
-                            if ch and ch.isdigit():
-                                board_size_str = board_size_str[:bs_cursor] + ch + board_size_str[bs_cursor:]
-                                bs_cursor += 1
+                            active_input = None
 
                 status_font = g.small_font or g.font
                 g.display.fill((20, 20, 20))
@@ -783,14 +863,25 @@ def run_cli(argv=None):
                     cursor_x = inp_bs_rect.x + 6 + status_font.size(board_size_str[:bs_cursor])[0]
                     pygame.draw.line(g.display, WHITE, (cursor_x, inp_bs_rect.y + 4), (cursor_x, inp_bs_rect.bottom - 4))
 
+                seed_label_top = status_font.render('Deterministic eval seed (optional):', True, WHITE)
+                g.display.blit(seed_label_top, (sx + 20, sy + 150))
+                seed_border = (255, 220, 50) if active_input == 'seed' else (150, 150, 150)
+                pygame.draw.rect(g.display, (40, 40, 40), inp_seed_rect)
+                pygame.draw.rect(g.display, seed_border, inp_seed_rect, 2)
+                seed_txt = status_font.render(seed_str, True, WHITE)
+                g.display.blit(seed_txt, (inp_seed_rect.x + 6, inp_seed_rect.y + 6))
+                if active_input == 'seed' and show_cursor:
+                    seed_px = inp_seed_rect.x + 6 + status_font.size(seed_str[:seed_cursor])[0]
+                    pygame.draw.line(g.display, WHITE, (seed_px, inp_seed_rect.y + 4), (seed_px, inp_seed_rect.bottom - 4))
+
                 chk_border = (150, 150, 150)
                 chk_fill = (40, 40, 40)
-                if viz_seed is None:
+                if seed_value is None:
                     chk_fill = (28, 28, 28)
                     chk_border = (90, 90, 90)
                 pygame.draw.rect(g.display, chk_fill, chk_seed_rect)
                 pygame.draw.rect(g.display, chk_border, chk_seed_rect, 2)
-                if use_seed and viz_seed is not None:
+                if use_seed and seed_value is not None:
                     pygame.draw.line(
                         g.display, WHITE,
                         (chk_seed_rect.x + 5, chk_seed_rect.y + 12),
@@ -800,11 +891,11 @@ def run_cli(argv=None):
                         (chk_seed_rect.x + 10, chk_seed_rect.y + 18),
                         (chk_seed_rect.x + 19, chk_seed_rect.y + 6), 2)
                 seed_label = (
-                    f'Deterministic eval seed: {viz_seed}'
-                    if viz_seed is not None
-                    else 'Deterministic eval seed: not available'
+                    f'Use seed in visualization ({seed_value})'
+                    if seed_value is not None
+                    else 'Use seed in visualization (enter numeric seed)'
                 )
-                seed_color = WHITE if viz_seed is not None else (150, 150, 150)
+                seed_color = WHITE if seed_value is not None else (150, 150, 150)
                 seed_surf = status_font.render(seed_label, True, seed_color)
                 g.display.blit(seed_surf, (chk_seed_rect.right + 8, chk_seed_rect.y + 1))
 
@@ -818,7 +909,7 @@ def run_cli(argv=None):
                     if g.current_checkpoint_path
                     else 'No checkpoint loaded'
                 )
-                info_y = sy + 168
+                info_y = sy + 260
                 for line in [level_status, ckpt_status]:
                     clipped = g._fit_text(line, status_font, sub_w - 24)
                     surf = status_font.render(clipped, True, WHITE)
