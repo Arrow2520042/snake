@@ -8,10 +8,18 @@ This module contains:
 """
 
 import random
+import importlib
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+try:
+    _per_cy = importlib.import_module('per_cython_backend')
+    _PER_CYTHON_AVAILABLE = True
+except Exception:
+    _per_cy = None
+    _PER_CYTHON_AVAILABLE = False
 
 
 class SumTree:
@@ -77,6 +85,11 @@ class PrioritizedReplayBuffer:
         self.tree = SumTree(capacity)
         self.capacity = capacity
         self._beta_step = 0
+        self._cython_enabled = bool(_PER_CYTHON_AVAILABLE)
+
+    @property
+    def cython_enabled(self):
+        return self._cython_enabled
 
     def _get_priority(self, error):
         return (np.abs(error) + self.PER_E) ** self.PER_A
@@ -98,19 +111,38 @@ class PrioritizedReplayBuffer:
         )
         self._beta_step += 1
 
-        for i in range(batch_size):
-            lo = segment * i
-            hi = segment * (i + 1)
-            value = random.uniform(lo, hi)
-            idx, priority, data = self.tree.get(value)
-            if data is None:
-                value = random.uniform(0, self.tree.total())
+        if self._cython_enabled and segment > 0.0:
+            offsets = np.random.uniform(0.0, segment, size=batch_size).astype(np.float64)
+            values = offsets + segment * np.arange(batch_size, dtype=np.float64)
+            idx_arr = _per_cy.sample_indices(self.tree.tree, self.tree.capacity, values)
+            for idx in idx_arr:
+                idx_i = int(idx)
+                data_idx = idx_i - self.tree.capacity + 1
+                data = self.tree.data[data_idx] if 0 <= data_idx < self.tree.capacity else None
+                if data is None:
+                    value = random.uniform(0, self.tree.total())
+                    idx_i, priority, data = self.tree.get(value)
+                    if data is None:
+                        continue
+                else:
+                    priority = self.tree.tree[idx_i]
+                batch.append(data)
+                indices.append(idx_i)
+                priorities.append(priority)
+        else:
+            for i in range(batch_size):
+                lo = segment * i
+                hi = segment * (i + 1)
+                value = random.uniform(lo, hi)
                 idx, priority, data = self.tree.get(value)
-            if data is None:
-                continue
-            batch.append(data)
-            indices.append(idx)
-            priorities.append(priority)
+                if data is None:
+                    value = random.uniform(0, self.tree.total())
+                    idx, priority, data = self.tree.get(value)
+                if data is None:
+                    continue
+                batch.append(data)
+                indices.append(idx)
+                priorities.append(priority)
 
         if not batch:
             return None
@@ -132,8 +164,15 @@ class PrioritizedReplayBuffer:
         )
 
     def update_priorities(self, indices, errors):
-        for idx, error in zip(indices, errors):
-            self.tree.update(idx, self._get_priority(error))
+        idx_np = np.asarray(indices, dtype=np.int64)
+        if idx_np.size == 0:
+            return
+        pri_np = np.asarray(self._get_priority(np.asarray(errors, dtype=np.float64)), dtype=np.float64)
+        if self._cython_enabled:
+            _per_cy.batch_update(self.tree.tree, idx_np, pri_np)
+        else:
+            for idx, priority in zip(idx_np, pri_np):
+                self.tree.update(int(idx), float(priority))
 
     def __len__(self):
         return self.tree.size
@@ -271,11 +310,12 @@ class DQNAgent:
                 return int(np.random.choice(valid))
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-            q_vals = self.policy_net(s).squeeze(0).detach().cpu().numpy()
+            s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            q_vals = self.policy_net(s).squeeze(0)
             if mask is not None:
-                q_vals = np.where(mask, q_vals, -1e9)
-            return int(np.argmax(q_vals))
+                mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+                q_vals = q_vals.masked_fill(~mask_t, torch.finfo(q_vals.dtype).min)
+            return int(q_vals.argmax().item())
 
     def act_batch(self, states, action_masks=None):
         """Select actions for a batch of states in a single forward pass."""
@@ -304,9 +344,10 @@ class DQNAgent:
             if masks is not None:
                 mask_t = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
                 q_values = q_values.masked_fill(~mask_t, torch.finfo(q_values.dtype).min)
-            greedy_actions = q_values.argmax(dim=1).detach().cpu().numpy()
+            greedy_actions_t = q_values.argmax(dim=1)
 
-        actions[~explore_mask] = greedy_actions[~explore_mask]
+        exploit_indices = np.flatnonzero(~explore_mask)
+        actions[exploit_indices] = greedy_actions_t[exploit_indices].detach().cpu().numpy()
         return actions
 
     def push(self, env_id, state, action, reward, next_state, done, snake_length=None):

@@ -142,11 +142,12 @@ class CNNAgent:
                 return int(np.random.choice(valid))
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            s = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-            q_vals = self.policy_net(s).squeeze(0).detach().cpu().numpy()
+            s = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            q_vals = self.policy_net(s).squeeze(0)
             if mask is not None:
-                q_vals = np.where(mask, q_vals, -1e9)
-            return int(np.argmax(q_vals))
+                mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+                q_vals = q_vals.masked_fill(~mask_t, torch.finfo(q_vals.dtype).min)
+            return int(q_vals.argmax().item())
 
     def act_batch(self, states, action_masks=None):
         """Select actions for a batch of states in a single forward pass."""
@@ -177,9 +178,10 @@ class CNNAgent:
             if masks is not None:
                 mask_t = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
                 q_values = q_values.masked_fill(~mask_t, torch.finfo(q_values.dtype).min)
-            greedy_actions = q_values.argmax(dim=1).detach().cpu().numpy()
+            greedy_actions_t = q_values.argmax(dim=1)
 
-        actions[~explore_mask] = greedy_actions[~explore_mask]
+        exploit_indices = np.flatnonzero(~explore_mask)
+        actions[exploit_indices] = greedy_actions_t[exploit_indices].detach().cpu().numpy()
         return actions
 
     # -- experience storage ----------------------------------------------

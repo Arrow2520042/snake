@@ -51,6 +51,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
           eval_max_steps=None, eval_seed=12345,
           rollback_source='auto', scheduler_source='auto',
           walls_mode=False,
+          fast_eval_mode=False,
           instant_eval_drop_ratio=0.50,
           npz_save_every=2000):
     """Main training orchestrator.
@@ -63,6 +64,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     Optimizer details (Adam), target updates, and LR scheduler internals live
     inside agent.update()/agent.step_scheduler() in dqn_agent.py/cnn_agent.py.
     """
+
+    if torch.cuda.is_available():
+        # Favor throughput over strict determinism in long training runs.
+        torch.backends.cudnn.benchmark = True
+        try:
+            torch.set_float32_matmul_precision('high')
+        except Exception:
+            pass
 
     state_mode = 'grid' if agent_type == 'cnn' else 'features'
 
@@ -86,6 +95,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     resume_eps_min = float(resume_eps_min)
     resume_eps_max = max(resume_eps_min, float(resume_eps_max))
     npz_save_every = max(1, int(npz_save_every))
+    fast_eval_mode = bool(fast_eval_mode)
+
+    if fast_eval_mode:
+        eval_every = max(10_000, int(eval_every))
+        eval_episodes = min(max(1, int(eval_episodes)), 12)
+        eval_max_steps = max_steps if eval_max_steps is None else max(1, int(eval_max_steps))
+        eval_max_steps = min(eval_max_steps, 6_000)
+        npz_save_every = max(npz_save_every, 10_000)
 
     # 2) Optional checkpoint restore for resume/fine-tuning workflows.
     if init_checkpoint and os.path.isfile(init_checkpoint):
@@ -203,10 +220,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         return avg_score, avg_steps
 
     device_name = getattr(agent, 'device', 'cpu')
+    numba_enabled = bool(getattr(envs[0], 'numba_enabled', False)) if envs else False
+    per_cython_enabled = bool(getattr(agent.replay, 'cython_enabled', False))
     print(f'Agent: {agent_type.upper()} | device: {device_name} | '
           f'reward_mode: {effective_reward_mode} '
           f'({reward_switch_start:.2f}->{reward_switch_end:.2f}) | '
             f'action_masking: {action_masking} | '
+            f'numba: {numba_enabled} | '
+            f'per_cython: {per_cython_enabled} | '
             f'n_step: {agent.n_step} | eps: {agent.eps:.4f}/{agent.eps_min:.4f}')
 
     # 5) Training log setup (metadata + compressed metric snapshots).
@@ -233,6 +254,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'reward_switch_end: {reward_switch_end:.3f}\n')
             fi.write(f'action_masking: {action_masking}\n')
             fi.write(f'device: {getattr(agent, "device", "cpu")}\n')
+            fi.write(f'numba_enabled: {numba_enabled}\n')
+            fi.write(f'per_cython_enabled: {per_cython_enabled}\n')
+            fi.write(f'fast_eval_mode: {fast_eval_mode}\n')
             fi.write(f'level_path: {level_path}\n')
             fi.write(f'init_checkpoint: {init_checkpoint}\n')
             fi.write(f'episodes: {episodes}\n')
@@ -590,6 +614,8 @@ if __name__ == '__main__':
     parser.add_argument('--save-every', type=int, default=10000)
     parser.add_argument('--npz-save-every', type=int, default=2000,
                         help='Flush rewards.npz every N episodes (higher reduces I/O overhead)')
+    parser.add_argument('--fast-eval', action='store_true',
+                        help='Use lighter eval/log cadence for higher training throughput')
     parser.add_argument('--level', type=str, default=None, help='Path to level JSON')
     parser.add_argument('--init-checkpoint', type=str, default=None, help='Path to .pth to resume')
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')
@@ -768,5 +794,6 @@ if __name__ == '__main__':
         rollback_source=args.rollback_source,
         scheduler_source=args.scheduler_source,
         walls_mode=args.walls,
+        fast_eval_mode=args.fast_eval,
         instant_eval_drop_ratio=args.instant_eval_drop_ratio,
     )

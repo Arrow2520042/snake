@@ -6,10 +6,19 @@ and reward shaping used by training and evaluation scripts.
 
 from collections import deque
 from enum import Enum
+import importlib
 import random
 
 import numpy as np
 import pygame
+
+try:
+    _numba_mod = importlib.import_module('numba')
+    njit = _numba_mod.njit
+    _NUMBA_AVAILABLE = True
+except Exception:
+    njit = None
+    _NUMBA_AVAILABLE = False
 
 from game_layout import (
     recompute_layout as _layout_recompute_layout,
@@ -71,6 +80,131 @@ PANEL_MAX_W = 460
 MIN_BLOCK_PIXELS = 10
 
 
+if _NUMBA_AVAILABLE:
+    @njit(cache=True)
+    def _bfs_reachable_count(blocked, start_x, start_y):
+        bb = blocked.shape[0]
+        if start_x < 0 or start_x >= bb or start_y < 0 or start_y >= bb:
+            return 0
+        if blocked[start_y, start_x] != 0:
+            return 0
+
+        visited = np.zeros((bb, bb), dtype=np.uint8)
+        qx = np.empty(bb * bb, dtype=np.int32)
+        qy = np.empty(bb * bb, dtype=np.int32)
+
+        head = 0
+        tail = 0
+        qx[tail] = start_x
+        qy[tail] = start_y
+        tail += 1
+        visited[start_y, start_x] = 1
+        count = 1
+
+        while head < tail:
+            cx = qx[head]
+            cy = qy[head]
+            head += 1
+
+            nx = cx + 1
+            ny = cy
+            if nx < bb and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+                count += 1
+
+            nx = cx - 1
+            if nx >= 0 and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+                count += 1
+
+            nx = cx
+            ny = cy + 1
+            if ny < bb and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+                count += 1
+
+            ny = cy - 1
+            if ny >= 0 and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+                count += 1
+
+        return count
+
+
+    @njit(cache=True)
+    def _bfs_path_exists(blocked, start_x, start_y, goal_x, goal_y):
+        bb = blocked.shape[0]
+        if start_x < 0 or start_x >= bb or start_y < 0 or start_y >= bb:
+            return False
+        if goal_x < 0 or goal_x >= bb or goal_y < 0 or goal_y >= bb:
+            return False
+        if blocked[start_y, start_x] != 0:
+            return False
+
+        visited = np.zeros((bb, bb), dtype=np.uint8)
+        qx = np.empty(bb * bb, dtype=np.int32)
+        qy = np.empty(bb * bb, dtype=np.int32)
+
+        head = 0
+        tail = 0
+        qx[tail] = start_x
+        qy[tail] = start_y
+        tail += 1
+        visited[start_y, start_x] = 1
+
+        while head < tail:
+            cx = qx[head]
+            cy = qy[head]
+            head += 1
+
+            if cx == goal_x and cy == goal_y:
+                return True
+
+            nx = cx + 1
+            ny = cy
+            if nx < bb and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+
+            nx = cx - 1
+            if nx >= 0 and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+
+            nx = cx
+            ny = cy + 1
+            if ny < bb and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+
+            ny = cy - 1
+            if ny >= 0 and blocked[ny, nx] == 0 and visited[ny, nx] == 0:
+                visited[ny, nx] = 1
+                qx[tail] = nx
+                qy[tail] = ny
+                tail += 1
+
+        return False
+
+
 class SnakeGameAI:
     """Snake environment with cell-based internal state.
 
@@ -111,6 +245,7 @@ class SnakeGameAI:
         self.reward_switch_end = re
         if seed is not None:
             random.seed(seed)
+        self.numba_enabled = _NUMBA_AVAILABLE
 
         if self.render:
             pygame.init()
@@ -194,7 +329,6 @@ class SnakeGameAI:
         self.frame_iteration = 0
         self._steps_since_food = 0
         self._recent_positions = deque(maxlen=64)
-        self._recent_set = set()
         self._prev_food_dist = self._manhattan_to_food()
         self._just_ate = False
         self._cached_flood = None
@@ -232,22 +366,38 @@ class SnakeGameAI:
 
     def _place_food(self):
         """Place food on any free cell that is not occupied by snake or walls."""
-        occupied = set(self.snake)
+        bb = self.board_blocks
+        occupied = set(self.snake_body_set)
+        occupied.add(self.head)
         if self.walls:
             occupied |= self.walls
-        free = [
-            (cx, cy)
-            for cy in range(self.board_blocks)
-            for cx in range(self.board_blocks)
-            if (cx, cy) not in occupied
-        ]
-        if not free:
+
+        free_cells = bb * bb - len(occupied)
+        if free_cells <= 0:
             self.food = self.head
             self.no_food_slots = True
             return False
-        self.food = random.choice(free)
-        self.no_food_slots = False
-        return True
+
+        # Fast path: random rejection sampling avoids materializing all free cells.
+        tries = min(64, free_cells * 2)
+        for _ in range(tries):
+            cx = random.randrange(bb)
+            cy = random.randrange(bb)
+            if (cx, cy) not in occupied:
+                self.food = (cx, cy)
+                self.no_food_slots = False
+                return True
+
+        for cy in range(bb):
+            for cx in range(bb):
+                if (cx, cy) not in occupied:
+                    self.food = (cx, cy)
+                    self.no_food_slots = False
+                    return True
+
+        self.food = self.head
+        self.no_food_slots = True
+        return False
 
     def is_collision(self, pt=None):
         if pt is None:
@@ -386,12 +536,11 @@ class SnakeGameAI:
                 complex_reward -= 0.1 * hunger_ratio
 
             # Anti-loop penalty to discourage short cyclic trajectories.
-            if self.head in self._recent_set:
+            if self.head in self._recent_positions:
                 loop_penalty = 0.35 + 0.30 * occupancy
                 complex_reward -= loop_penalty
 
             self._recent_positions.append(self.head)
-            self._recent_set = set(self._recent_positions)
 
         # Hunger penalty (simple branch).
         if self.reward_mode in ('simple', 'blend'):
@@ -612,6 +761,20 @@ class SnakeGameAI:
 
         bb = self.board_blocks
         tail = self.snake[-1]
+
+        if _NUMBA_AVAILABLE:
+            blocked = np.zeros((bb, bb), dtype=np.uint8)
+            for bx, by in self.snake_body_set:
+                blocked[by, bx] = 1
+            if self.walls:
+                for wx, wy in self.walls:
+                    blocked[wy, wx] = 1
+            blocked[tail[1], tail[0]] = 0
+
+            hx, hy = self.head
+            tx, ty = tail
+            return bool(_bfs_path_exists(blocked, hx, hy, tx, ty))
+
         blocked = set(self.snake_body_set)
         blocked.discard(tail)
         walls = self.walls
@@ -643,6 +806,30 @@ class SnakeGameAI:
         bb = self.board_blocks
         body_set = self.snake_body_set
         walls = self.walls
+
+        if _NUMBA_AVAILABLE:
+            blocked = np.zeros((bb, bb), dtype=np.uint8)
+            for bx, by in body_set:
+                blocked[by, bx] = 1
+            if walls:
+                for wx, wy in walls:
+                    blocked[wy, wx] = 1
+
+            extra_count = 0
+            if extra_block:
+                ex, ey = extra_block
+                if blocked[ey, ex] == 0:
+                    blocked[ey, ex] = 1
+                    extra_count = 1
+
+            total_free = bb * bb - len(body_set) - extra_count - (len(walls) if walls else 0)
+            if total_free <= 0:
+                return 0.0
+
+            hx, hy = self.head
+            reachable = int(_bfs_reachable_count(blocked, hx, hy))
+            return reachable / float(total_free)
+
         visited = set()
         queue = deque()
         queue.append(self.head)
