@@ -1,0 +1,9 @@
+best_score: 1
+best_avg200: 0.000000
+instant_eval_drop_ratio: 0.500000
+instant_eval_rollbacks: 0
+rollback_source: auto
+scheduler_source: auto
+final_eps: 0.913919
+final_lr: 1.0e-03
+total_time: 4.4s

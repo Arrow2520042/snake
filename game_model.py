@@ -16,9 +16,11 @@ try:
     _numba_mod = importlib.import_module('numba')
     njit = _numba_mod.njit
     _NUMBA_AVAILABLE = True
-except Exception:
+    _NUMBA_IMPORT_ERROR = ''
+except Exception as exc:
     njit = None
     _NUMBA_AVAILABLE = False
+    _NUMBA_IMPORT_ERROR = str(exc)
 
 from game_layout import (
     recompute_layout as _layout_recompute_layout,
@@ -246,6 +248,7 @@ class SnakeGameAI:
         if seed is not None:
             random.seed(seed)
         self.numba_enabled = _NUMBA_AVAILABLE
+        self.numba_error = _NUMBA_IMPORT_ERROR
 
         if self.render:
             pygame.init()

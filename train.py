@@ -4,13 +4,21 @@ Supports N parallel environments (single-threaded, round-robin stepping)
 for higher throughput.  CUDA used automatically when available.
 
 Usage:
-    python train.py --episodes 1000
-    python train.py --simple-rewards --board-size 10 --num-envs 64
-    python train.py --v12-from-scratch --episodes 300000
-    python train.py --v14-resume --init-checkpoint best_eval.pth
-    python train.py --v14-resume --sleep
-    python train.py --level levels/mymap.json --board-size 20
-    python train.py --init-checkpoint model.pth --episodes 500
+    Linux/Pop!_OS:
+        ./bootstrap_popos.sh
+        ./run_train.sh --episodes 1000
+    Windows (PowerShell):
+        powershell -ExecutionPolicy Bypass -File .\\bootstrap_windows.ps1
+        .\\run_train.ps1 --episodes 1000
+
+    Direct invocation (active venv required):
+        python train.py --episodes 1000
+        python train.py --simple-rewards --board-size 10 --num-envs 64
+        python train.py --v12-from-scratch --episodes 300000
+        python train.py --v14-resume --init-checkpoint best_eval.pth
+        python train.py --v14-resume --sleep
+        python train.py --level levels/mymap.json --board-size 20
+        python train.py --init-checkpoint model.pth --episodes 500
 """
 
 import argparse
@@ -21,10 +29,19 @@ import platform
 import random
 import shutil
 import subprocess
+import sys
 import time
 
-import numpy as np
-import torch
+try:
+    import numpy as np
+    import torch
+except ModuleNotFoundError as exc:
+    setup_hint = '.\\bootstrap_windows.ps1' if platform.system().lower() == 'windows' else './bootstrap_popos.sh'
+    raise SystemExit(
+        f"Missing Python dependency '{exc.name}' in interpreter {sys.executable}. "
+        f"Run setup first: {setup_hint}"
+    ) from exc
+
 from game import SnakeGameAI
 
 
@@ -286,8 +303,12 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         return avg_score, avg_steps
 
     device_name = getattr(agent, 'device', 'cpu')
+    python_executable = sys.executable
     numba_enabled = bool(getattr(envs[0], 'numba_enabled', False)) if envs else False
+    numba_error = str(getattr(envs[0], 'numba_error', '')).strip() if envs else ''
     per_cython_enabled = bool(getattr(agent.replay, 'cython_enabled', False))
+    setup_hint = '.\\bootstrap_windows.ps1' if platform.system().lower() == 'windows' else './bootstrap_popos.sh'
+    print(f'Python: {python_executable}')
     print(f'Agent: {agent_type.upper()} | device: {device_name} | '
           f'reward_mode: {effective_reward_mode} '
           f'({reward_switch_start:.2f}->{reward_switch_end:.2f}) | '
@@ -295,6 +316,11 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             f'numba: {numba_enabled} | '
             f'per_cython: {per_cython_enabled} | '
             f'n_step: {agent.n_step} | eps: {agent.eps:.4f}/{agent.eps_min:.4f}')
+    if not (numba_enabled and per_cython_enabled):
+        print('WARNING: accelerator backend unavailable in current interpreter.')
+        if (not numba_enabled) and numba_error:
+            print(f'  numba import error: {numba_error}')
+        print(f'  setup command: {setup_hint}')
 
     # 5) Training log setup (metadata + compressed metric snapshots).
     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -320,6 +346,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             fi.write(f'reward_switch_end: {reward_switch_end:.3f}\n')
             fi.write(f'action_masking: {action_masking}\n')
             fi.write(f'device: {getattr(agent, "device", "cpu")}\n')
+            fi.write(f'python_executable: {python_executable}\n')
             fi.write(f'numba_enabled: {numba_enabled}\n')
             fi.write(f'per_cython_enabled: {per_cython_enabled}\n')
             fi.write(f'fast_eval_mode: {fast_eval_mode}\n')

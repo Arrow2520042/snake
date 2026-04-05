@@ -9,17 +9,36 @@ This module contains:
 
 import random
 import importlib
+import glob
+import os
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-try:
-    _per_cy = importlib.import_module('per_cython_backend')
-    _PER_CYTHON_AVAILABLE = True
-except Exception:
-    _per_cy = None
-    _PER_CYTHON_AVAILABLE = False
+
+def _load_per_cython_backend():
+    """Load optional Cython PER backend from in-place or build output paths."""
+    try:
+        return importlib.import_module('per_cython_backend'), True
+    except Exception:
+        pass
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    build_glob = os.path.join(base_dir, 'build', 'lib.*')
+    for build_dir in sorted(glob.glob(build_glob)):
+        if build_dir not in sys.path:
+            sys.path.insert(0, build_dir)
+        try:
+            return importlib.import_module('per_cython_backend'), True
+        except Exception:
+            continue
+
+    return None, False
+
+
+_per_cy, _PER_CYTHON_AVAILABLE = _load_per_cython_backend()
 
 
 class SumTree:

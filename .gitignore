@@ -1,0 +1,13 @@
+# Python cache artifacts
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+
+# Local virtual environments
+.venv/
+
+# Platform-specific extension build outputs
+build/lib.*/
+build/temp.*/
+*.so
