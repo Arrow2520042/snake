@@ -1,0 +1,12 @@
+best_score: 87
+best_avg200: 47.715000
+instant_eval_drop_ratio: 0.250000
+instant_eval_rollbacks: 0
+rollback_source: eval
+scheduler_source: eval
+best_eval_avg_score: 57.812500
+best_eval_path: logs/v14_1115k/20260331-215130/best_eval.pth
+eval_points: 33
+final_eps: 0.020000
+final_lr: 1.0e-05
+total_time: 58035.2s

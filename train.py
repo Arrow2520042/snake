@@ -7,6 +7,8 @@ Usage:
     python train.py --episodes 1000
     python train.py --simple-rewards --board-size 10 --num-envs 64
     python train.py --v12-from-scratch --episodes 300000
+    python train.py --v14-resume --init-checkpoint best_eval.pth
+    python train.py --v14-resume --sleep
     python train.py --level levels/mymap.json --board-size 20
     python train.py --init-checkpoint model.pth --episodes 500
 """
@@ -15,7 +17,10 @@ import argparse
 import datetime
 import json
 import os
+import platform
 import random
+import shutil
+import subprocess
 import time
 
 import numpy as np
@@ -33,6 +38,67 @@ def _load_walls(level_path, board_blocks):
         if 0 <= cx < board_blocks and 0 <= cy < board_blocks:
             walls.add((cx, cy))
     return walls
+
+
+def _find_latest_best_eval_checkpoint(logs_root='logs'):
+    """Return the most recent best_eval checkpoint path or None."""
+    root_candidate = 'best_eval.pth'
+    if os.path.isfile(root_candidate):
+        return root_candidate
+
+    candidates = []
+    if os.path.isdir(logs_root):
+        for root_dir, _, files in os.walk(logs_root):
+            if 'best_eval.pth' not in files:
+                continue
+            path = os.path.join(root_dir, 'best_eval.pth')
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            candidates.append((mtime, path))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _suspend_system():
+    """Try to suspend the host system; returns (ok, detail)."""
+    os_name = platform.system().lower()
+
+    if os_name == 'linux':
+        commands = [
+            ['systemctl', 'suspend'],
+            ['loginctl', 'suspend'],
+            ['pm-suspend'],
+        ]
+    elif os_name == 'darwin':
+        commands = [
+            ['pmset', 'sleepnow'],
+        ]
+    elif os_name == 'windows':
+        commands = [
+            ['rundll32.exe', 'powrprof.dll,SetSuspendState', '0,1,0'],
+        ]
+    else:
+        return False, f'Unsupported OS for suspend: {os_name}'
+
+    errors = []
+    for cmd in commands:
+        exe = cmd[0]
+        if shutil.which(exe) is None:
+            errors.append(f'{exe}: not found in PATH')
+            continue
+
+        try:
+            subprocess.run(cmd, check=True)
+            return True, ' '.join(cmd)
+        except Exception as exc:
+            errors.append(f'{" ".join(cmd)}: {exc}')
+
+    return False, '; '.join(errors) if errors else 'No suspend command available'
 
 
 def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
@@ -457,7 +523,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 if ep_counter % npz_save_every == 0:
                     np.savez_compressed(log_path,
                         scores=np.array(all_scores, dtype=np.int16),
-                        rewards=np.array(all_rewards, dtype=np.float16),
+                        rewards=np.array(all_rewards, dtype=np.float32),
                         steps=np.array(all_steps, dtype=np.uint16),
                         losses=np.array(recent_losses, dtype=np.float32),
                         qvals=np.array(recent_qvals, dtype=np.float32),
@@ -569,7 +635,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     # -- save final models ----------------------------------------------
     np.savez_compressed(log_path,
         scores=np.array(all_scores, dtype=np.int16),
-        rewards=np.array(all_rewards, dtype=np.float16),
+        rewards=np.array(all_rewards, dtype=np.float32),
         steps=np.array(all_steps, dtype=np.uint16),
         losses=np.array(recent_losses, dtype=np.float32),
         qvals=np.array(recent_qvals, dtype=np.float32),
@@ -620,6 +686,8 @@ if __name__ == '__main__':
     parser.add_argument('--init-checkpoint', type=str, default=None, help='Path to .pth to resume')
     parser.add_argument('--log-name', type=str, default=None, help='Subdirectory name for logs')
     parser.add_argument('--save', type=str, default='model.pth', help='Final model filename')
+    parser.add_argument('--sleep', action='store_true',
+                        help='Suspend the computer after training finishes')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
     parser.add_argument('--num-envs', type=int, default=128, help='Parallel environments (e.g. 64-128)')
     parser.add_argument('--agent', type=str, default='cnn', choices=['dqn', 'cnn'],
@@ -677,6 +745,8 @@ if __name__ == '__main__':
                         help='Metric source for LR scheduler: avg200, eval, or auto')
     parser.add_argument('--v12-from-scratch', action='store_true',
                         help='Apply recommended V12 config for training from scratch')
+    parser.add_argument('--v14-resume', action='store_true',
+                        help='Apply recommended V14 fine-tuning config (higher exploration + denser eval)')
     parser.add_argument('--fresh', action='store_true',
                         help='Load weights only, reset training state (eps, optimizer, steps)')
     args = parser.parse_args()
@@ -720,6 +790,83 @@ if __name__ == '__main__':
             args.resume_eps_min = 0.04
             args.resume_eps_max = 0.12
             print('Note: --v12-from-scratch + --init-checkpoint detected; enabling resume epsilon boost.')
+
+    if args.v14_resume:
+        default_episodes = parser.get_default('episodes')
+        default_save_every = parser.get_default('save_every')
+        default_npz_save_every = parser.get_default('npz_save_every')
+        default_eval_every = parser.get_default('eval_every')
+        default_eval_episodes = parser.get_default('eval_episodes')
+        default_instant_eval_drop_ratio = parser.get_default('instant_eval_drop_ratio')
+        default_rollback_source = parser.get_default('rollback_source')
+        default_scheduler_source = parser.get_default('scheduler_source')
+        default_rollback_eps_mult = parser.get_default('rollback_eps_mult')
+        default_rollback_eps_min = parser.get_default('rollback_eps_min')
+        default_rollback_eps_max = parser.get_default('rollback_eps_max')
+        default_rollback_eps_hold = parser.get_default('rollback_eps_hold')
+        default_save = parser.get_default('save')
+
+        args.agent = 'cnn'
+        args.board_size = 10
+        args.num_envs = 128
+        args.reward_mode = 'blend'
+        args.reward_switch_start = 0.25
+        args.reward_switch_end = 0.35
+        args.simple_rewards = False
+
+        if args.fast_eval:
+            print('Note: --v14-resume disables --fast-eval to keep dense evaluation cadence.')
+        args.fast_eval = False
+
+        if args.init_checkpoint is None:
+            auto_ckpt = _find_latest_best_eval_checkpoint()
+            if auto_ckpt:
+                args.init_checkpoint = auto_ckpt
+                print(f'Note: --v14-resume auto-selected checkpoint: {auto_ckpt}')
+            else:
+                print('Note: --v14-resume could not auto-find best_eval checkpoint; pass --init-checkpoint <path>.')
+
+        if args.log_name is None:
+            args.log_name = 'v14_resume'
+        if args.save == default_save:
+            args.save = 'v14_b10_resume.pth'
+
+        if args.episodes == default_episodes:
+            args.episodes = 120000
+        if args.save_every == default_save_every:
+            args.save_every = 10000
+        if args.npz_save_every == default_npz_save_every:
+            args.npz_save_every = 5000
+
+        if args.eps_start is None:
+            args.eps_start = 0.08
+        if args.eps_min is None:
+            args.eps_min = 0.02
+        if args.eps_decay is None:
+            args.eps_decay = 0.9995
+
+        if args.eval_every == default_eval_every:
+            args.eval_every = 3000
+        if args.eval_episodes == default_eval_episodes:
+            args.eval_episodes = 32
+        if args.eval_max_steps is None:
+            args.eval_max_steps = 6000
+
+        if args.rollback_source == default_rollback_source:
+            args.rollback_source = 'eval'
+        if args.scheduler_source == default_scheduler_source:
+            args.scheduler_source = 'eval'
+        if args.instant_eval_drop_ratio == default_instant_eval_drop_ratio:
+            args.instant_eval_drop_ratio = 0.25
+
+        if args.rollback_eps_mult == default_rollback_eps_mult:
+            args.rollback_eps_mult = 2.0
+        if args.rollback_eps_min == default_rollback_eps_min:
+            args.rollback_eps_min = 0.05
+        if args.rollback_eps_max == default_rollback_eps_max:
+            args.rollback_eps_max = 0.12
+        if args.rollback_eps_hold == default_rollback_eps_hold:
+            args.rollback_eps_hold = 5000
 
     if args.walls:
         if not args.level:
@@ -797,3 +944,11 @@ if __name__ == '__main__':
         fast_eval_mode=args.fast_eval,
         instant_eval_drop_ratio=args.instant_eval_drop_ratio,
     )
+
+    if args.sleep:
+        print('Sleep requested (--sleep): attempting to suspend the system...')
+        ok, detail = _suspend_system()
+        if ok:
+            print(f'Suspend command executed: {detail}')
+        else:
+            print(f'WARNING: Could not suspend the system: {detail}')

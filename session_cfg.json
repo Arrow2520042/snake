@@ -1,1 +1,1 @@
-{"checkpoint_path": "E:/vsc projects/snake/best_eval.pth", "eval_seed": 12345}
+{"checkpoint_path": "./logs/v14_1115k/20260331-215130/best_eval.pth", "eval_seed": 12345}

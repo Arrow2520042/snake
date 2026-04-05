@@ -11,8 +11,8 @@ def recompute_layout(self):
     Game state uses cell coordinates so no entity remapping is needed.
     """
     cfg = getattr(self, 'layout_cfg', {})
-    min_window_w = int(cfg.get('min_window_w', 1000))
-    min_window_h = int(cfg.get('min_window_h', 700))
+    min_window_w = int(cfg.get('min_window_w', 640))
+    min_window_h = int(cfg.get('min_window_h', 480))
     panel_min_w = int(cfg.get('panel_min_w', 280))
     panel_max_w = int(cfg.get('panel_max_w', 460))
     min_block_pixels = int(cfg.get('min_block_pixels', 10))
@@ -51,13 +51,21 @@ def recompute_layout(self):
 def resize_window(self, w, h):
     """Resize the render surface and recompute all dependent layout rectangles."""
     cfg = getattr(self, 'layout_cfg', {})
-    min_window_w = int(cfg.get('min_window_w', 1000))
-    min_window_h = int(cfg.get('min_window_h', 700))
+    min_window_w = int(cfg.get('min_window_w', 640))
+    min_window_h = int(cfg.get('min_window_h', 480))
 
-    self.w = max(int(w), min_window_w)
-    self.h = max(int(h), min_window_h)
+    new_w = max(int(w), min_window_w)
+    new_h = max(int(h), min_window_h)
+
+    if self.w == new_w and self.h == new_h:
+        return
+
+    self.w = new_w
+    self.h = new_h
     if self.render:
-        self.display = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
+        cur_size = self.display.get_size() if self.display is not None else (-1, -1)
+        if cur_size != (self.w, self.h):
+            self.display = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
     self._recompute_layout()
 
 

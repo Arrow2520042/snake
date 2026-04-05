@@ -10,6 +10,7 @@ import json
 import os
 import random
 import sys
+import traceback
 
 import pygame
 
@@ -790,6 +791,7 @@ def run_cli(argv=None):
                                 else:
                                     info_msg = 'Visualization finished (seed disabled).'
                             except Exception as e:
+                                traceback.print_exc()
                                 info_msg = f'Visualization failed: {e}'
                             submenu = False
                         elif btn_back.collidepoint(mx, my):

@@ -70,8 +70,8 @@ DEFAULT_SPEED = 30
 MAX_EPISODE_MOVES = 15000
 
 BOARD_BLOCKS = 20
-MIN_WINDOW_W = 1000
-MIN_WINDOW_H = 700
+MIN_WINDOW_W = 640
+MIN_WINDOW_H = 480
 LEFT_PANEL_W = 300
 UI_MARGIN = 10
 FOOTER_H = 112
@@ -442,7 +442,13 @@ class SnakeGameAI:
         self._steps_since_food += 1
         self._just_ate = False
 
-        if self.is_collision():
+        # Moving onto the current tail cell is safe when the snake does not grow this step.
+        will_grow = (self.head == self.food)
+        tail_tip = None
+        if not will_grow and len(self.snake) > 1:
+            tail_tip = self.snake[-1]
+
+        if self._is_blocked_excluding(self.head[0], self.head[1], tail_tip):
             done = True
             reward = -10
             return self._get_obs(), reward, done, {'score': self.score, 'reason': 'collision'}

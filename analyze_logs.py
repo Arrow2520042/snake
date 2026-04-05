@@ -20,9 +20,10 @@ def load_data(path):
 
 def analyze(path):
     scores, rewards, steps = load_data(path)
+    score_stdev = statistics.stdev(scores) if len(scores) > 1 else 0.0
 
     print(f'Total episodes: {len(scores)}')
-    print(f'Score: min={min(scores)} max={max(scores)} mean={statistics.mean(scores):.1f} median={statistics.median(scores):.1f} stdev={statistics.stdev(scores):.1f}')
+    print(f'Score: min={min(scores)} max={max(scores)} mean={statistics.mean(scores):.1f} median={statistics.median(scores):.1f} stdev={score_stdev:.1f}')
     print(f'Reward: min={min(rewards):.1f} max={max(rewards):.1f} mean={statistics.mean(rewards):.1f}')
     print(f'Steps: min={min(steps)} max={max(steps)} mean={statistics.mean(steps):.0f}')
     print()

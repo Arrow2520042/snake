@@ -20,9 +20,11 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
 
     # Auto-detect architecture from checkpoint keys.
     data = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    ckpt_board_size = None
     if isinstance(data, dict) and 'board_size' in data:
+        ckpt_board_size = int(data.get('board_size', board_size))
         from cnn_agent import CNNAgent
-        agent = CNNAgent(board_size=board_size)
+        agent = CNNAgent(board_size=ckpt_board_size)
         state_mode = 'grid'
         agent_type = 'CNN'
     else:
@@ -31,7 +33,8 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
         state_mode = 'features'
         agent_type = 'DQN'
 
-    env = SnakeGameAI(render=True, speed=speed, board_blocks=board_size,
+    env_board_size = ckpt_board_size if ckpt_board_size is not None else board_size
+    env = SnakeGameAI(render=True, speed=speed, board_blocks=env_board_size,
                       state_mode=state_mode)
 
     if level:
@@ -70,8 +73,9 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
                 if event.type == pygame.VIDEORESIZE:
                     env.resize_window(event.w, event.h)
 
-            action = agent.act(state)
+            action = agent.act(state, action_mask=env.get_safe_action_mask())
             state, reward, done, info = env.play_step(action, skip_events=True)
+            pygame.display.flip()
             total_reward += reward
             steps += 1
 
