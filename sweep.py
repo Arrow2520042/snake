@@ -1,4 +1,4 @@
-"""Hyperparameter sweep for Snake DQN agent.
+"""Hyperparameter sweep for Snake CNN agent.
 
 Runs multiple training sessions with different hyperparameter combinations
 and logs results for comparison.
@@ -20,9 +20,9 @@ from game import SnakeGameAI
 
 def run_single(params, episodes, max_steps, level_path, board_size):
     """Train one short run and return comparable summary metrics."""
-    from dqn_agent import DQNAgent
+    from cnn_agent import CNNAgent
 
-    env = SnakeGameAI(render=False, board_blocks=board_size)
+    env = SnakeGameAI(render=False, board_blocks=board_size, state_mode='grid')
 
     if level_path and os.path.isfile(level_path):
         import json
@@ -35,7 +35,8 @@ def run_single(params, episodes, max_steps, level_path, board_size):
                 walls.add((cx, cy))
         env.walls = walls
 
-    agent = DQNAgent(
+    agent = CNNAgent(
+        board_size=board_size,
         lr=params.get('lr', 1e-3),
         gamma=params.get('gamma', 0.99),
         batch_size=params.get('batch_size', 64),
@@ -52,7 +53,7 @@ def run_single(params, episodes, max_steps, level_path, board_size):
         total_reward = 0.0
         # Standard online loop: act -> step env -> store transition -> update agent.
         for t in range(max_steps):
-            action = agent.act(state)
+            action = agent.act(state, action_mask=env.get_safe_action_mask())
             ns, reward, done, info = env.play_step(action, skip_events=True)
             agent.push(0, state, action, reward, ns, done)
             agent.update()
@@ -121,7 +122,7 @@ def sweep(episodes=500, max_steps=15000, level_path=None, board_size=20):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Hyperparameter sweep for Snake DQN')
+    parser = argparse.ArgumentParser(description='Hyperparameter sweep for Snake CNN')
     parser.add_argument('--episodes', type=int, default=500)
     parser.add_argument('--max-steps', type=int, default=15000)
     parser.add_argument('--level', type=str, default=None)

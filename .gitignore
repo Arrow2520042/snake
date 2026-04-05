@@ -11,3 +11,12 @@ __pycache__/
 build/lib.*/
 build/temp.*/
 *.so
+*.pyd
+*.o
+*.obj
+*.lib
+*.exp
+
+# Local runtime outputs
+model.pth
+logs/smoke_*/

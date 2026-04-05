@@ -1,4 +1,4 @@
-"""Headless training script for Snake DQN/CNN agent.
+"""Headless training script for Snake CNN agent.
 
 Supports N parallel environments (single-threaded, round-robin stepping)
 for higher throughput.  CUDA used automatically when available.
@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+from collections import deque
 import datetime
 import json
 import os
@@ -60,10 +61,13 @@ def _load_walls(level_path, board_blocks):
 def _find_latest_best_eval_checkpoint(logs_root='logs'):
     """Return the most recent best_eval checkpoint path or None."""
     root_candidate = 'best_eval.pth'
-    if os.path.isfile(root_candidate):
-        return root_candidate
-
     candidates = []
+    if os.path.isfile(root_candidate):
+        try:
+            candidates.append((os.path.getmtime(root_candidate), root_candidate))
+        except OSError:
+            pass
+
     if os.path.isdir(logs_root):
         for root_dir, _, files in os.walk(logs_root):
             if 'best_eval.pth' not in files:
@@ -97,6 +101,7 @@ def _suspend_system():
         ]
     elif os_name == 'windows':
         commands = [
+            ['shutdown', '/h'],
             ['rundll32.exe', 'powrprof.dll,SetSuspendState', '0,1,0'],
         ]
     else:
@@ -145,7 +150,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     - Handle exploration schedules and rollback logic.
 
     Optimizer details (Adam), target updates, and LR scheduler internals live
-    inside agent.update()/agent.step_scheduler() in dqn_agent.py/cnn_agent.py.
+    inside agent.update()/agent.step_scheduler() in cnn_agent.py.
     """
 
     if torch.cuda.is_available():
@@ -156,15 +161,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         except Exception:
             pass
 
-    state_mode = 'grid' if agent_type == 'cnn' else 'features'
+    if str(agent_type).lower() != 'cnn':
+        raise ValueError('Only CNN agent is supported in current training pipeline.')
 
-    # 1) Select policy architecture (feature MLP or convolutional grid model).
-    if agent_type == 'cnn':
-        from cnn_agent import CNNAgent
-        agent = CNNAgent(board_size=board_size)
-    else:
-        from dqn_agent import DQNAgent
-        agent = DQNAgent()
+    state_mode = 'grid'
+
+    # 1) Select policy architecture (convolutional grid model).
+    from cnn_agent import CNNAgent
+    agent = CNNAgent(board_size=board_size)
 
     effective_reward_mode = 'simple' if simple_rewards else str(reward_mode).lower()
     if effective_reward_mode not in ('simple', 'complex', 'blend'):
@@ -212,7 +216,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     # Keep rollback LR aligned with the loaded checkpoint state (or explicit override),
     # not with Adam's constructor default.
     base_lr = float(agent.optimizer.param_groups[0]['lr'])
-    scheduler_patience = 10 if agent_type == 'cnn' else 50
+    scheduler_patience = 10
 
     walls = None
     wall_count = 0
@@ -242,6 +246,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
     def _run_deterministic_eval(eval_round_idx):
         """Run greedy evaluation (eps=0, action mask on) on fixed seeds."""
+        eval_steps_limit = int(eval_max_steps if eval_max_steps is not None else max_steps)
         old_eps = agent.eps
         old_steps = agent.steps
         was_training = agent.policy_net.training
@@ -255,7 +260,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         agent.policy_net.eval()
 
         eval_env = SnakeGameAI(render=False, board_blocks=board_size,
-                               max_episode_steps=eval_max_steps,
+                               max_episode_steps=eval_steps_limit,
                                state_mode=state_mode,
                                simple_rewards=(effective_reward_mode == 'simple'),
                                reward_mode=effective_reward_mode,
@@ -278,7 +283,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 state = eval_env.reset()
                 done = False
                 steps = 0
-                while (not done) and steps < eval_max_steps:
+                while (not done) and steps < eval_steps_limit:
                     mask = eval_env.get_safe_action_mask()
                     action = int(agent.act(state, action_mask=mask))
                     state, _, done, _ = eval_env.play_step(action, skip_events=True)
@@ -394,13 +399,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     best_ckpt_path = os.path.join(log_dir, 'best.pth')
     best_eval_avg = -1.0
     best_eval_ckpt_path = os.path.join(log_dir, 'best_eval.pth')
+    best_eval_root_path = os.path.abspath('best_eval.pth')
     eval_points = []
     eval_avg_scores = []
     eval_avg_steps = []
     latest_eval_score = None
     instant_eval_rollbacks = 0
     stagnation_counter = 0
-    STAGNATION_THRESHOLD = 15000  # episodes without meaningful improvement before rollback
+    STAGNATION_THRESHOLD = max(5000, min(15000, episodes // 30))
     STAGNATION_TOLERANCE = 0.9   # tolerate avg200 down to 90% of best before counting as stagnation
     ROLLBACK_EPS_THRESHOLD = 0.3  # don't rollback while still exploring (eps >= 0.3)
     rollback_eps_hold_episodes = max(0, int(rollback_eps_hold_episodes))
@@ -420,15 +426,22 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     scheduler_source = str(scheduler_source).lower()
     if scheduler_source not in ('auto', 'avg200', 'eval'):
         raise ValueError('scheduler_source must be one of: auto, avg200, eval')
-    scheduler_eps_gate = max(0.02, agent.eps_min * 2.0)
     eps_hold_until_ep = -1
     eps_hold_floor = 0.0
     updates_per_round = max(1, num_envs // 16)  # e.g. 128 envs → 8 updates/round
+    warmup_min_transitions = max(4000, agent.batch_size * 8)
     t_start = time.time()
-    recent_scores = []
-    recent_rewards = []
-    recent_losses = []
-    recent_qvals = []
+    recent_scores = deque(maxlen=METRIC_WINDOW)
+    recent_rewards = deque(maxlen=METRIC_WINDOW)
+    recent_losses = deque(maxlen=2000)
+    recent_qvals = deque(maxlen=2000)
+
+    def _tail_avg(values, take_last):
+        if not values:
+            return 0.0
+        take = max(1, min(int(take_last), len(values)))
+        tail = list(values)[-take:]
+        return float(sum(tail)) / float(take)
 
     # -- parallel episode loop ------------------------------------------
     # Each env runs its own episode concurrently; we round-robin step them.
@@ -455,8 +468,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 break
             action = int(actions[i])
             next_state, reward, done, info = env.play_step(action, skip_events=True)
-            agent.push(i, states[i], action, reward, next_state, done,
-                       snake_length=len(env.snake))
+            agent.push(i, states[i], action, reward, next_state, done)
             rewards_acc[i] += reward
             steps_acc[i] += 1
             states[i] = next_state
@@ -468,8 +480,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 recent_scores.append(score)
                 recent_rewards.append(ep_reward)
                 # Use 200-episode moving averages for lower-variance progress tracking.
-                avg200 = sum(recent_scores[-METRIC_WINDOW:]) / len(recent_scores[-METRIC_WINDOW:])
-                avgR200 = sum(recent_rewards[-METRIC_WINDOW:]) / len(recent_rewards[-METRIC_WINDOW:])
+                avg200 = sum(recent_scores) / len(recent_scores)
+                avgR200 = sum(recent_rewards) / len(recent_rewards)
 
                 if score > best_score:
                     best_score = score
@@ -518,6 +530,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
                         old_eps = agent.eps
                         agent.load(rollback_path)
+                        if hasattr(agent, 'reset_replay'):
+                            agent.reset_replay()
 
                         # Adaptive exploration boost after rollback.
                         new_eps = min(max(old_eps * rollback_eps_mult, rollback_eps_min), rollback_eps_max)
@@ -567,8 +581,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                         sum(all_steps[-METRIC_WINDOW:])
                         / max(1, len(all_steps[-METRIC_WINDOW:]))
                     )
-                    avg_loss = sum(recent_losses[-200:]) / max(1, len(recent_losses[-200:])) if recent_losses else 0.0
-                    avg_q = sum(recent_qvals[-200:]) / max(1, len(recent_qvals[-200:])) if recent_qvals else 0.0
+                    avg_loss = _tail_avg(recent_losses, 200)
+                    avg_q = _tail_avg(recent_qvals, 200)
                     print(f'ep {ep_counter}/{episodes} | '
                           f'best={best_score} avg200={avg200:.1f} '
                           f'avgR200={avgR200:.1f} avgSteps={avgSteps:.0f} | '
@@ -576,13 +590,10 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                           f'eps/s={eps_per_sec:.2f} steps/s={steps_per_sec:.0f} | '
                           f'eps={agent.eps:.4f} lr={lr:.1e} '
                           f'elapsed={elapsed:.0f}s')
-                    # LR scheduler is meaningful only when epsilon is already low.
-                    # During high exploration, score variance is too high for reliable LR decisions.
-                    if agent.eps <= scheduler_eps_gate:
-                        scheduler_metric = best_avg200
-                        if scheduler_source in ('eval', 'auto') and latest_eval_score is not None:
-                            scheduler_metric = latest_eval_score
-                        agent.step_scheduler(scheduler_metric)
+                    scheduler_metric = best_avg200
+                    if scheduler_source in ('eval', 'auto') and latest_eval_score is not None:
+                        scheduler_metric = latest_eval_score
+                    agent.step_scheduler(scheduler_metric)
 
                 # Deterministic policy check (eps=0 + action mask ON) for deployment-quality selection.
                 if eval_every > 0 and ep_counter % eval_every == 0:
@@ -596,7 +607,11 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                     if eval_score > best_eval_avg:
                         best_eval_avg = eval_score
                         agent.save(best_eval_ckpt_path)
-                        eval_status = 'new best_eval'
+                        try:
+                            agent.save(best_eval_root_path)
+                        except Exception:
+                            pass
+                        eval_status = f'new best_eval -> {os.path.basename(best_eval_root_path)}'
                     else:
                         eval_status = f'best_eval={best_eval_avg:.2f}'
 
@@ -610,6 +625,8 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                     ):
                         old_eps = agent.eps
                         agent.load(best_eval_ckpt_path)
+                        if hasattr(agent, 'reset_replay'):
+                            agent.reset_replay()
 
                         # Keep rollback behavior consistent with stagnation rollback.
                         new_eps = min(max(old_eps * rollback_eps_mult, rollback_eps_min), rollback_eps_max)
@@ -626,7 +643,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                             patience=scheduler_patience, min_lr=1e-5
                         )
 
-                        latest_eval_score = best_eval_avg
+                        latest_eval_score = eval_score
                         stagnation_counter = 0
                         instant_eval_rollbacks += 1
                         eval_status = (
@@ -650,14 +667,16 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
         # 6) Optimization stage.
         # Perform several optimizer updates per environment round.
         # This keeps replay consumption and model updates in balance for large num_envs.
-        if len(agent.replay) >= 10000:
+        if len(agent.replay) >= warmup_min_transitions:
             for _ in range(updates_per_round):
                 loss_val, q_val = agent.update()
                 if loss_val is not None:
                     recent_losses.append(loss_val)
                     recent_qvals.append(q_val)
-                    
-        agent.decay_epsilon()  # once per round, not per gradient update
+
+        # Keep temporary rollback exploration floor stable for the hold window.
+        if ep_counter >= eps_hold_until_ep:
+            agent.decay_epsilon()  # once per round, not per gradient update
 
     # -- save final models ----------------------------------------------
     np.savez_compressed(log_path,
@@ -692,6 +711,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             if eval_points:
                 ri.write(f'best_eval_avg_score: {best_eval_avg:.6f}\n')
                 ri.write(f'best_eval_path: {best_eval_ckpt_path}\n')
+                ri.write(f'best_eval_root_path: {best_eval_root_path}\n')
                 ri.write(f'eval_points: {len(eval_points)}\n')
             ri.write(f'final_eps: {agent.eps:.6f}\n')
             ri.write(f'final_lr: {agent.optimizer.param_groups[0]["lr"]:.1e}\n')
@@ -701,7 +721,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train Snake DQN agent (headless)')
+    parser = argparse.ArgumentParser(description='Train Snake CNN agent (headless)')
     parser.add_argument('--episodes', type=int, default=1000)
     parser.add_argument('--max-steps', type=int, default=15000)
     parser.add_argument('--save-every', type=int, default=10000)
@@ -717,8 +737,8 @@ if __name__ == '__main__':
                         help='Suspend the computer after training finishes')
     parser.add_argument('--board-size', type=int, default=20, help='Board size (curriculum learning)')
     parser.add_argument('--num-envs', type=int, default=128, help='Parallel environments (e.g. 64-128)')
-    parser.add_argument('--agent', type=str, default='cnn', choices=['dqn', 'cnn'],
-                        help='Agent type: dqn (feature vector) or cnn (grid observation)')
+    parser.add_argument('--agent', type=str, default='cnn', choices=['cnn'],
+                        help='Agent type (CNN grid policy only)')
     parser.add_argument('--simple-rewards', action='store_true',
                         help='Use simplified reward: +10 food, -10 death, -0.01 step')
     parser.add_argument('--no-action-masking', action='store_true',
@@ -805,7 +825,7 @@ if __name__ == '__main__':
         if args.eps_min is None:
             args.eps_min = 0.01
         if args.eps_decay is None:
-            args.eps_decay = 0.99975
+            args.eps_decay = 0.99990
         args.rollback_eps_mult = 2.5
         args.rollback_eps_min = 0.04
         args.rollback_eps_max = 0.12
@@ -870,7 +890,7 @@ if __name__ == '__main__':
         if args.eps_min is None:
             args.eps_min = 0.02
         if args.eps_decay is None:
-            args.eps_decay = 0.9995
+            args.eps_decay = 0.99970
 
         if args.eval_every == default_eval_every:
             args.eval_every = 3000

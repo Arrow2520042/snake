@@ -10,8 +10,6 @@ import importlib
 import random
 
 import numpy as np
-import pygame
-
 try:
     _numba_mod = importlib.import_module('numba')
     njit = _numba_mod.njit
@@ -22,19 +20,36 @@ except Exception as exc:
     _NUMBA_AVAILABLE = False
     _NUMBA_IMPORT_ERROR = str(exc)
 
-from game_layout import (
-    recompute_layout as _layout_recompute_layout,
-    resize_window as _layout_resize_window,
-    get_left_control_rects as _layout_get_left_control_rects,
-)
-from game_render import (
-    update_ui as _render_update_ui,
-    draw_panel_box as _render_draw_panel_box,
-    fit_text as _render_fit_text,
-    wrap_text as _render_wrap_text,
-    draw_footer_block as _render_draw_footer_block,
-)
-from game_designer import level_designer as _designer_level_designer
+
+def _import_pygame():
+    return importlib.import_module('pygame')
+
+
+def _load_view_helpers():
+    from game_layout import (
+        recompute_layout as layout_recompute_layout,
+        resize_window as layout_resize_window,
+        get_left_control_rects as layout_get_left_control_rects,
+    )
+    from game_render import (
+        update_ui as render_update_ui,
+        draw_panel_box as render_draw_panel_box,
+        fit_text as render_fit_text,
+        wrap_text as render_wrap_text,
+        draw_footer_block as render_draw_footer_block,
+    )
+    from game_designer import level_designer as designer_level_designer
+    return {
+        'layout_recompute_layout': layout_recompute_layout,
+        'layout_resize_window': layout_resize_window,
+        'layout_get_left_control_rects': layout_get_left_control_rects,
+        'render_update_ui': render_update_ui,
+        'render_draw_panel_box': render_draw_panel_box,
+        'render_fit_text': render_fit_text,
+        'render_wrap_text': render_wrap_text,
+        'render_draw_footer_block': render_draw_footer_block,
+        'designer_level_designer': designer_level_designer,
+    }
 
 
 class Direction(Enum):
@@ -224,7 +239,7 @@ class SnakeGameAI:
             speed=DEFAULT_SPEED,
             max_episode_steps=MAX_EPISODE_MOVES,
             board_blocks=BOARD_BLOCKS,
-            state_mode='features',
+            state_mode='grid',
             simple_rewards=False,
             reward_mode='complex',
             reward_switch_start=0.25,
@@ -234,7 +249,8 @@ class SnakeGameAI:
         self.render = render
         self.speed = speed
         self.max_episode_steps = max(1, int(max_episode_steps))
-        self.state_mode = state_mode      # 'features' or 'grid'
+        _ = state_mode
+        self.state_mode = 'grid'
         self.simple_rewards = simple_rewards
         self.reward_mode = str(reward_mode).lower()
         if self.simple_rewards:
@@ -249,14 +265,18 @@ class SnakeGameAI:
             random.seed(seed)
         self.numba_enabled = _NUMBA_AVAILABLE
         self.numba_error = _NUMBA_IMPORT_ERROR
+        self._pygame = None
+        self._view_helpers = None
 
         if self.render:
-            pygame.init()
-            self.display = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
-            pygame.display.set_caption('Snake AI - Project')
-            self.clock = pygame.time.Clock()
-            self.font = pygame.font.Font(pygame.font.get_default_font(), 25)
-            self.small_font = pygame.font.Font(pygame.font.get_default_font(), 18)
+            self._pygame = _import_pygame()
+            self._view_helpers = _load_view_helpers()
+            self._pygame.init()
+            self.display = self._pygame.display.set_mode((self.w, self.h), self._pygame.RESIZABLE)
+            self._pygame.display.set_caption('Snake AI - Project')
+            self.clock = self._pygame.time.Clock()
+            self.font = self._pygame.font.Font(self._pygame.font.get_default_font(), 25)
+            self.small_font = self._pygame.font.Font(self._pygame.font.get_default_font(), 18)
         else:
             self.display = None
             self.clock = None
@@ -290,8 +310,6 @@ class SnakeGameAI:
         self.board_blocks = board_blocks
         self.left_panel_width = LEFT_PANEL_W
         self.footer_height = FOOTER_H
-        self.left_panel_rect = pygame.Rect(0, 0, self.left_panel_width, self.h)
-        self.footer_rect = pygame.Rect(0, self.h - self.footer_height, self.w, self.footer_height)
         self.bs = BLOCK_SIZE
         self.board_w = self.bs * self.board_blocks
         self.board_h = self.bs * self.board_blocks
@@ -299,18 +317,31 @@ class SnakeGameAI:
         self.board_y = 0
         self.walls = set()
 
-        self._recompute_layout()
+        if self.render:
+            self.left_panel_rect = self._pygame.Rect(0, 0, self.left_panel_width, self.h)
+            self.footer_rect = self._pygame.Rect(0, self.h - self.footer_height, self.w, self.footer_height)
+            self._recompute_layout()
+        else:
+            self.left_panel_rect = None
+            self.footer_rect = None
+
         self.reset()
 
     # -- Layout delegates (View support) -------------------------------
     def _recompute_layout(self):
-        _layout_recompute_layout(self)
+        if not self.render or not self._view_helpers:
+            return
+        self._view_helpers['layout_recompute_layout'](self)
 
     def resize_window(self, w, h):
-        _layout_resize_window(self, w, h)
+        if not self.render or not self._view_helpers:
+            return
+        self._view_helpers['layout_resize_window'](self, w, h)
 
     def _get_left_control_rects(self, panel_h=260):
-        return _layout_get_left_control_rects(self, panel_h=panel_h)
+        if not self.render or not self._view_helpers:
+            return None, None, None, None, None
+        return self._view_helpers['layout_get_left_control_rects'](self, panel_h=panel_h)
 
     # -- Core environment state ----------------------------------------
     def reset(self):
@@ -338,10 +369,8 @@ class SnakeGameAI:
         return self._get_obs()
 
     def _get_obs(self):
-        """Return an observation vector matching the selected state_mode."""
-        if self.state_mode == 'grid':
-            return self.get_grid_state()
-        return self.get_state()
+        """Return CNN grid observation vector."""
+        return self.get_grid_state()
 
     def _manhattan_to_food(self):
         if self.food is None:
@@ -419,9 +448,9 @@ class SnakeGameAI:
         self.frame_iteration += 1
 
         if self.render and not skip_events:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
+            for event in self._pygame.event.get():
+                if event.type == self._pygame.QUIT:
+                    self._pygame.quit()
                     return self._get_obs(), 0, True, {'quit': True}
 
         if self.no_food_slots:
@@ -518,11 +547,12 @@ class SnakeGameAI:
         )
 
         # Flood fill is one of the heaviest operations per step.
-        if self.state_mode == 'features' or complex_active:
+        if complex_active:
             reachable_ratio = self._flood_fill_ratio()
             self._cached_flood = reachable_ratio
         else:
-            reachable_ratio = self._cached_flood if self._cached_flood is not None else 1.0
+            reachable_ratio = 1.0
+            self._cached_flood = None
 
         if complex_active:
             # Space awareness penalty: avoid entering tight regions.
@@ -574,22 +604,34 @@ class SnakeGameAI:
 
     # -- Render delegates (View API) -----------------------------------
     def _update_ui(self):
-        return _render_update_ui(self)
+        if not self.render or not self._view_helpers:
+            return None
+        return self._view_helpers['render_update_ui'](self)
 
     def _draw_panel_box(self, rect):
-        return _render_draw_panel_box(self, rect)
+        if not self.render or not self._view_helpers:
+            return None
+        return self._view_helpers['render_draw_panel_box'](self, rect)
 
     def _fit_text(self, text, font, max_width):
-        return _render_fit_text(self, text, font, max_width)
+        if not self.render or not self._view_helpers:
+            return str(text)
+        return self._view_helpers['render_fit_text'](self, text, font, max_width)
 
     def _wrap_text(self, text, font, max_width):
-        return _render_wrap_text(self, text, font, max_width)
+        if not self.render or not self._view_helpers:
+            return [str(text)]
+        return self._view_helpers['render_wrap_text'](self, text, font, max_width)
 
     def _draw_footer_block(self, lines):
-        return _render_draw_footer_block(self, lines)
+        if not self.render or not self._view_helpers:
+            return None
+        return self._view_helpers['render_draw_footer_block'](self, lines)
 
     def level_designer(self):
-        return _designer_level_designer(self)
+        if not self.render or not self._view_helpers:
+            return None
+        return self._view_helpers['designer_level_designer'](self)
 
     # -- Movement / action parsing -------------------------------------
     def _move(self, action):
@@ -645,108 +687,6 @@ class SnakeGameAI:
         if not any(mask):
             return [True, True, True]
         return mask
-
-    # -- Feature observations ------------------------------------------
-    def get_state(self):
-        """Return 26 hand-crafted features for the tabular/MLP DQN policy."""
-        hx, hy = self.head
-        bb = self.board_blocks
-        inv_bb = 1.0 / bb
-
-        idx = _CW_IDX[self.direction]
-        dir_s = _CW[idx]
-        dir_r = _CW[(idx + 1) & 3]
-        dir_l = _CW[(idx - 1) & 3]
-        dir_b = _CW[(idx + 2) & 3]
-
-        # Tail tip is passable only when the snake did not just eat.
-        tail_tip = None
-        if not self._just_ate and len(self.snake) > 1:
-            tail_tip = self.snake[-1]
-
-        dxs, dys = DIR_VECTORS[dir_s]
-        dxr, dyr = DIR_VECTORS[dir_r]
-        dxl, dyl = DIR_VECTORS[dir_l]
-        danger_s = int(self._is_blocked_excluding(hx + dxs, hy + dys, tail_tip))
-        danger_r = int(self._is_blocked_excluding(hx + dxr, hy + dyr, tail_tip))
-        danger_l = int(self._is_blocked_excluding(hx + dxl, hy + dyl, tail_tip))
-
-        # Normalized food offset in [-1, 1] approx.
-        food_dx = (self.food[0] - hx) * inv_bb
-        food_dy = (self.food[1] - hy) * inv_bb
-
-        body_set = self.snake_body_set
-        walls = self.walls
-
-        def ray_wall(d):
-            dx, dy = DIR_VECTORS[d]
-            cx, cy = hx + dx, hy + dy
-            dist = 1
-            while 0 <= cx < bb and 0 <= cy < bb:
-                if walls and (cx, cy) in walls:
-                    return dist * inv_bb
-                cx += dx
-                cy += dy
-                dist += 1
-            return dist * inv_bb
-
-        def ray_body(d):
-            dx, dy = DIR_VECTORS[d]
-            cx, cy = hx + dx, hy + dy
-            dist = 1
-            while 0 <= cx < bb and 0 <= cy < bb:
-                if (cx, cy) in body_set and (cx, cy) != tail_tip:
-                    return dist * inv_bb
-                cx += dx
-                cy += dy
-                dist += 1
-            return 1.0
-
-        flood_ratio = getattr(self, '_cached_flood', None)
-        if flood_ratio is None:
-            flood_ratio = self._flood_fill_ratio()
-
-        # Simulate the board as if food cell were additionally blocked (future body growth).
-        food_safety = self._flood_fill_ratio(extra_block=self.food)
-
-        tail = self.snake[-1]
-        tail_dx = (tail[0] - hx) * inv_bb
-        tail_dy = (tail[1] - hy) * inv_bb
-        tail_dist = (abs(tail[0] - hx) + abs(tail[1] - hy)) * inv_bb
-
-        # One-step reachable-space estimates for each action.
-        action_flood_s = self._action_flood_fill(0)
-        action_flood_r = self._action_flood_fill(1)
-        action_flood_l = self._action_flood_fill(2)
-
-        return [
-            danger_s,
-            danger_r,
-            danger_l,
-            int(self.direction == Direction.UP),
-            int(self.direction == Direction.DOWN),
-            int(self.direction == Direction.LEFT),
-            int(self.direction == Direction.RIGHT),
-            food_dx,
-            food_dy,
-            ray_wall(dir_s),
-            ray_wall(dir_r),
-            ray_wall(dir_l),
-            ray_wall(dir_b),
-            ray_body(dir_s),
-            ray_body(dir_r),
-            ray_body(dir_l),
-            ray_body(dir_b),
-            len(self.snake) / (bb * bb),
-            flood_ratio,
-            food_safety,
-            tail_dx,
-            tail_dy,
-            tail_dist,
-            action_flood_s,
-            action_flood_r,
-            action_flood_l,
-        ]
 
     def _is_blocked_excluding(self, cx, cy, exclude=None):
         """Collision test that treats one cell (typically moving tail) as passable."""
@@ -863,61 +803,6 @@ class SnakeGameAI:
 
         extra_count = 1 if extra_block and extra_block not in body_set else 0
         total_free = bb * bb - len(body_set) - extra_count - (len(walls) if walls else 0)
-        if total_free <= 0:
-            return 0.0
-        return len(visited) / total_free
-
-    def _action_flood_fill(self, action_idx):
-        """Estimate reachable-space ratio after simulating a one-step action."""
-        idx = _CW_IDX[self.direction]
-        if action_idx == 1:
-            idx = (idx + 1) & 3
-        elif action_idx == 2:
-            idx = (idx - 1) & 3
-        d = _CW[idx]
-        dx, dy = DIR_VECTORS[d]
-        nx, ny = self.head[0] + dx, self.head[1] + dy
-        bb = self.board_blocks
-
-        if nx < 0 or nx >= bb or ny < 0 or ny >= bb:
-            return 0.0
-        if self.walls and (nx, ny) in self.walls:
-            return 0.0
-
-        tail_tip = self.snake[-1] if len(self.snake) > 1 else None
-        if (nx, ny) in self.snake_body_set and (nx, ny) != tail_tip:
-            return 0.0
-
-        # BFS after transition assumptions: old head becomes body, tail moves.
-        body_set = self.snake_body_set
-        walls = self.walls
-        head = self.head
-        visited = set()
-        queue = deque()
-        queue.append((nx, ny))
-        visited.add((nx, ny))
-
-        while queue:
-            cx, cy = queue.popleft()
-            for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ax, ay = cx + ddx, cy + ddy
-                if (ax, ay) in visited:
-                    continue
-                if ax < 0 or ax >= bb or ay < 0 or ay >= bb:
-                    continue
-                if (ax, ay) == head:
-                    continue
-                if (ax, ay) in body_set and (ax, ay) != tail_tip:
-                    continue
-                if walls and (ax, ay) in walls:
-                    continue
-                visited.add((ax, ay))
-                queue.append((ax, ay))
-
-        blocked_body = len(body_set) + 1
-        if tail_tip is not None:
-            blocked_body -= 1
-        total_free = bb * bb - blocked_body - (len(walls) if walls else 0)
         if total_free <= 0:
             return 0.0
         return len(visited) / total_free

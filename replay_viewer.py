@@ -1,4 +1,4 @@
-"""Visual replay utility for trained Snake checkpoints.
+"""Visual replay utility for trained Snake CNN checkpoints.
 
 This tool loads a model checkpoint, runs deterministic evaluation episodes
 (`eps=0`), and displays them in the GUI for qualitative inspection.
@@ -18,22 +18,18 @@ def replay(checkpoint, level=None, speed=10, board_size=20, episodes=5):
     """Replay deterministic evaluation episodes from a trained checkpoint."""
     import torch
 
-    # Auto-detect architecture from checkpoint keys.
+    # CNN-only path: board_size can still be read from checkpoint metadata.
     data = torch.load(checkpoint, map_location='cpu', weights_only=False)
     ckpt_board_size = None
     if isinstance(data, dict) and 'board_size' in data:
         ckpt_board_size = int(data.get('board_size', board_size))
-        from cnn_agent import CNNAgent
-        agent = CNNAgent(board_size=ckpt_board_size)
-        state_mode = 'grid'
-        agent_type = 'CNN'
-    else:
-        from dqn_agent import DQNAgent
-        agent = DQNAgent()
-        state_mode = 'features'
-        agent_type = 'DQN'
 
+    from cnn_agent import CNNAgent
     env_board_size = ckpt_board_size if ckpt_board_size is not None else board_size
+    agent = CNNAgent(board_size=env_board_size)
+    state_mode = 'grid'
+    agent_type = 'CNN'
+
     env = SnakeGameAI(render=True, speed=speed, board_blocks=env_board_size,
                       state_mode=state_mode)
 

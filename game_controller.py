@@ -227,15 +227,13 @@ def run_cli(argv=None):
             np = None
 
         agent = None
-        agent_type = 'dqn'
+        agent_type = 'cnn'
         ckpt_board_size = None
         if init_ckpt:
             try:
                 data = torch_mod.load(init_ckpt, map_location='cpu', weights_only=False)
-                if isinstance(data, dict):
-                    if 'board_size' in data:
-                        agent_type = 'cnn'
-                        ckpt_board_size = int(data['board_size'])
+                if isinstance(data, dict) and 'board_size' in data:
+                    ckpt_board_size = int(data['board_size'])
             except Exception:
                 pass
 
@@ -244,14 +242,9 @@ def run_cli(argv=None):
             env.layout_cfg['board_blocks'] = ckpt_board_size
             env._recompute_layout()
 
-        if agent_type == 'cnn':
-            from cnn_agent import CNNAgent
-            agent = CNNAgent(board_size=env.board_blocks)
-            env.state_mode = 'grid'
-        else:
-            from dqn_agent import DQNAgent
-            agent = DQNAgent()
-            env.state_mode = 'features'
+        from cnn_agent import CNNAgent
+        agent = CNNAgent(board_size=env.board_blocks)
+        env.state_mode = 'grid'
 
         if init_ckpt:
             try:
@@ -590,7 +583,7 @@ def run_cli(argv=None):
             recent_scores.append(float(env.score))
             recent_steps.append(float(ep_steps))
 
-        env.state_mode = 'features'
+        env.state_mode = 'grid'
         env.reset()
 
     notif_msg = ''

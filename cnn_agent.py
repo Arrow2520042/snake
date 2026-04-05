@@ -2,7 +2,7 @@
 
 Uses a grid observation (body_age, head, food, walls) + auxiliary vector
 (direction one-hot, normalized length) instead of hand-crafted features.
-Shares PER and NStepBuffer infrastructure with dqn_agent.py.
+Uses shared PER and NStepBuffer infrastructure from replay_buffer.py.
 
 Training stack highlights:
 - Adam optimizer for adaptive gradient updates.
@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from dqn_agent import PrioritizedReplayBuffer, NStepBuffer
+from replay_buffer import PrioritizedReplayBuffer, NStepBuffer
 
 
 class DuelingCNN(nn.Module):
@@ -103,11 +103,12 @@ class CNNAgent:
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5)
         self.replay = PrioritizedReplayBuffer(capacity)
+        self._replay_capacity = capacity
 
         self.steps = 0
         self.eps = 1.0
         self.eps_min = 0.01
-        self.eps_decay = 0.9997
+        self.eps_decay = 0.99985
         self._nstep_buffers = {}
 
     # -- action selection ------------------------------------------------
@@ -188,8 +189,7 @@ class CNNAgent:
     def push(self, env_id, state, action, reward, next_state, done, snake_length=None):
         if env_id not in self._nstep_buffers:
             self._nstep_buffers[env_id] = NStepBuffer(self.n_step, self.gamma)
-        if snake_length is not None:
-            self._nstep_buffers[env_id].n = max(3, min(self.n_step, snake_length))
+        _ = snake_length
         transitions = self._nstep_buffers[env_id].push(state, action, reward, next_state, done)
         for s0, a0, R, s_n, d_n, steps_used in transitions:
             self.replay.push(s0, a0, R, s_n, d_n, steps_used)
@@ -246,6 +246,11 @@ class CNNAgent:
 
     def step_scheduler(self, metric):
         self.scheduler.step(metric)
+
+    def reset_replay(self):
+        """Drop replay history after rollback to avoid relearning from stale transitions."""
+        self.replay = PrioritizedReplayBuffer(self._replay_capacity)
+        self._nstep_buffers.clear()
 
     # -- soft target update ----------------------------------------------
     def _soft_update(self):
