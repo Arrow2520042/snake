@@ -12,10 +12,10 @@ from setuptools import Extension, setup
 import numpy as np
 
 try:
-    from Cython.Build import cythonize
+    from Cython.Build import cythonize as _cythonize
     _HAS_CYTHON = True
 except Exception:
-    cythonize = None
+    _cythonize = None
     _HAS_CYTHON = False
 
 
@@ -31,7 +31,10 @@ extensions = [
     )
 ]
 
-ext_modules = cythonize(extensions, language_level='3') if _HAS_CYTHON else extensions
+if _HAS_CYTHON and _cythonize is not None:
+    ext_modules = _cythonize(extensions, language_level='3')
+else:
+    ext_modules = extensions
 
 
 setup(

@@ -1,4 +1,4 @@
-"""Dueling CNN DQN agent with PER, n-step returns, and CUDA support.
+"""CNN Q-learning agent with PER, n-step returns, and CUDA support.
 
 Uses a grid observation (body_age, head, food, walls) + auxiliary vector
 (direction one-hot, normalized length) instead of hand-crafted features.
@@ -20,7 +20,7 @@ from replay_buffer import PrioritizedReplayBuffer, NStepBuffer
 
 
 class DuelingCNN(nn.Module):
-    """Dueling DQN with convolutional backbone for grid input.
+    """Dueling Q-network with convolutional backbone for grid input.
 
     Input tensor layout (flat): [grid_channels * board^2 | aux_features]
     The forward pass reshapes the grid portion into (C, H, W) for conv layers,
@@ -72,7 +72,7 @@ class DuelingCNN(nn.Module):
 
 
 class CNNAgent:
-    """Dueling Double DQN with CNN backbone, n-step returns, PER, and CUDA.
+    """CNN-based double Q-learning with n-step returns, PER, and CUDA.
 
     Grid state: 4 channels (body_age, head, food, walls) + 5 aux features
     (direction one-hot + normalized length) = 4*board^2 + 5 flat floats.
@@ -197,7 +197,7 @@ class CNNAgent:
 
     # -- gradient update -------------------------------------------------
     def update(self):
-        """Run one CNN-DQN optimization step with PER weighting and n-step targets."""
+        """Run one CNN Q-learning optimization step with PER weighting and n-step targets."""
         if len(self.replay) < self.batch_size:
             return None, None
         sample = self.replay.sample(self.batch_size)
