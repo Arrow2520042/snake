@@ -16,7 +16,11 @@ try:
     _NUMBA_AVAILABLE = True
     _NUMBA_IMPORT_ERROR = ''
 except Exception as exc:
-    njit = None
+    def njit(*args, **kwargs):
+        def _decorator(fn):
+            return fn
+        return _decorator
+
     _NUMBA_AVAILABLE = False
     _NUMBA_IMPORT_ERROR = str(exc)
 
@@ -317,9 +321,17 @@ class SnakeGameAI:
         self.board_y = 0
         self.walls = set()
 
+        # Session/UI fields used by the controller layer.
+        self.current_level_name: str | None = None
+        self.current_level_path: str | None = None
+        self.current_checkpoint_path: str | None = None
+
         if self.render:
-            self.left_panel_rect = self._pygame.Rect(0, 0, self.left_panel_width, self.h)
-            self.footer_rect = self._pygame.Rect(0, self.h - self.footer_height, self.w, self.footer_height)
+            pg = self._pygame
+            if pg is None:
+                raise RuntimeError('Render mode requires pygame.')
+            self.left_panel_rect = pg.Rect(0, 0, self.left_panel_width, self.h)
+            self.footer_rect = pg.Rect(0, self.h - self.footer_height, self.w, self.footer_height)
             self._recompute_layout()
         else:
             self.left_panel_rect = None
@@ -448,9 +460,12 @@ class SnakeGameAI:
         self.frame_iteration += 1
 
         if self.render and not skip_events:
-            for event in self._pygame.event.get():
-                if event.type == self._pygame.QUIT:
-                    self._pygame.quit()
+            pg = self._pygame
+            if pg is None:
+                raise RuntimeError('Render mode requires pygame.')
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    pg.quit()
                     return self._get_obs(), 0, True, {'quit': True}
 
         if self.no_food_slots:
@@ -497,6 +512,11 @@ class SnakeGameAI:
             reward = -10
             return self._get_obs(), reward, done, {'score': self.score, 'reason': 'food_timeout'}
 
+        if self.food is None:
+            done = True
+            reward = -10
+            return self._get_obs(), reward, done, {'score': self.score, 'reason': 'no_food'}
+
         # Distance shaping reference value.
         new_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
         simple_reward = -0.01
@@ -513,7 +533,10 @@ class SnakeGameAI:
                 self._next_segment_id += 1
 
             self._place_food()
-            self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
+            if self.food is None:
+                self._prev_food_dist = 0
+            else:
+                self._prev_food_dist = abs(self.head[0] - self.food[0]) + abs(self.head[1] - self.food[1])
             simple_reward = 10.0
 
             # Complex reward: post-eat free-space safety estimate.
@@ -564,9 +587,21 @@ class SnakeGameAI:
                 complex_reward -= 0.1
 
             # High-occupancy anti-trap: keep a viable path from head to tail.
-            if occupancy >= 0.25 and len(self.snake) > 6 and not self._has_head_to_tail_path():
-                trap_penalty = 0.20 + 0.60 * occupancy
-                complex_reward -= trap_penalty
+            if occupancy >= 0.25 and len(self.snake) > 6:
+                if not self._has_head_to_tail_path():
+                    trap_penalty = 0.20 + 0.60 * occupancy
+                    if occupancy >= 0.55:
+                        # Stronger late-game punishment when head-tail connectivity is broken.
+                        trap_penalty += 0.35 + 1.20 * (occupancy - 0.55)
+                    complex_reward -= trap_penalty
+
+                if occupancy >= 0.55:
+                    # Penalize narrow tactical tunnels even if immediate collision is avoided.
+                    safe_count = sum(1 for ok in self.get_safe_action_mask() if ok)
+                    if safe_count <= 1:
+                        complex_reward -= 0.25 + 0.90 * occupancy
+                    elif safe_count == 2:
+                        complex_reward -= 0.08 + 0.30 * occupancy
 
             # Hunger penalty (complex branch).
             hunger_threshold = self.board_blocks * 2 + len(self.snake)
@@ -660,11 +695,59 @@ class SnakeGameAI:
             return self._parse_action(action.tolist())
         raise ValueError('Unsupported action format: %r' % (action,))
 
-    def get_safe_action_mask(self):
-        """Return [straight, right, left] mask for immediate-death filtering.
+    def _next_head_from(self, head, direction, action):
+        idx = _CW_IDX[direction]
+        if action == 1:
+            idx = (idx + 1) & 3
+        elif action == 2:
+            idx = (idx - 1) & 3
+        ndir = _CW[idx]
+        dx, dy = DIR_VECTORS[ndir]
+        return (head[0] + dx, head[1] + dy), ndir
 
-        True means the action is safe for a one-step lookahead. If all actions
-        are unsafe (rare edge case), all actions are re-enabled as fallback.
+    def _simulate_step(self, snake_cells, direction, action, food_cell):
+        """Simulate one action on a lightweight snake copy; return None if blocked."""
+        next_head, next_dir = self._next_head_from(snake_cells[0], direction, action)
+        nx, ny = next_head
+
+        if nx < 0 or nx >= self.board_blocks or ny < 0 or ny >= self.board_blocks:
+            return None
+        if self.walls and next_head in self.walls:
+            return None
+
+        will_grow = (food_cell is not None and next_head == food_cell)
+        blocked = set(snake_cells if will_grow else snake_cells[:-1])
+        if next_head in blocked:
+            return None
+
+        if will_grow:
+            next_snake = [next_head] + list(snake_cells)
+            next_food = None
+        else:
+            next_snake = [next_head] + list(snake_cells[:-1])
+            next_food = food_cell
+        return next_snake, next_dir, next_food
+
+    def _exists_safe_lookahead(self, snake_cells, direction, depth, food_cell):
+        """Return True if there exists any collision-free action sequence of given depth."""
+        if depth <= 0:
+            return True
+
+        for action in (0, 1, 2):
+            sim = self._simulate_step(snake_cells, direction, action, food_cell)
+            if sim is None:
+                continue
+            next_snake, next_dir, next_food = sim
+            if self._exists_safe_lookahead(next_snake, next_dir, depth - 1, next_food):
+                return True
+        return False
+
+    def get_safe_action_mask(self):
+        """Return [straight, right, left] action mask.
+
+        Baseline behavior filters immediate-death actions. In late game
+        (high occupancy), the mask is tightened with a short 2-3 step
+        collision-free lookahead to avoid entering tactical dead ends.
         """
         idx = _CW_IDX[self.direction]
         tail_tip = None
@@ -686,6 +769,30 @@ class SnakeGameAI:
 
         if not any(mask):
             return [True, True, True]
+
+        occupancy = self._occupancy_ratio()
+        if occupancy < 0.45 or len(self.snake) < 8:
+            return mask
+
+        lookahead_depth = 3 if occupancy >= 0.70 else 2
+        refined = list(mask)
+        base_snake = list(self.snake)
+        base_dir = self.direction
+        food_cell = self.food
+
+        for action in (0, 1, 2):
+            if not refined[action]:
+                continue
+            sim = self._simulate_step(base_snake, base_dir, action, food_cell)
+            if sim is None:
+                refined[action] = False
+                continue
+            next_snake, next_dir, next_food = sim
+            if not self._exists_safe_lookahead(next_snake, next_dir, lookahead_depth - 1, next_food):
+                refined[action] = False
+
+        if any(refined):
+            return refined
         return mask
 
     def _is_blocked_excluding(self, cx, cy, exclude=None):

@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import traceback
+from typing import cast
 
 import pygame
 
@@ -36,6 +37,16 @@ def run_cli(argv=None):
                 print('Game over. Score:', g.score)
                 break
         return
+
+    # From here onward this CLI branch is GUI-only.
+    if g.display is None or g.font is None:
+        raise RuntimeError('Render mode requires initialized display and fonts.')
+    g.display = cast(pygame.Surface, g.display)
+    g.font = cast(pygame.font.Font, g.font)
+    if g.small_font is None:
+        g.small_font = g.font
+    else:
+        g.small_font = cast(pygame.font.Font, g.small_font)
 
     btn_w = 360
     btn_h = 64
@@ -72,9 +83,16 @@ def run_cli(argv=None):
         except Exception:
             return None
 
-    def _extract_eval_seed_from_metadata(meta_path):
+    def _parse_float_or_none(value):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _extract_int_key_from_metadata(meta_path, key_name):
         if not meta_path or not os.path.isfile(meta_path):
             return None
+        key_low = str(key_name).lower()
         try:
             with open(meta_path, 'r', encoding='utf-8') as f:
                 for raw in f:
@@ -82,7 +100,7 @@ def run_cli(argv=None):
                     if not line:
                         continue
                     low = line.lower()
-                    if not low.startswith('eval_seed'):
+                    if not low.startswith(key_low):
                         continue
                     if ':' in line:
                         val = line.split(':', 1)[1].strip()
@@ -96,10 +114,70 @@ def run_cli(argv=None):
             return None
         return None
 
-    def _detect_eval_seed_from_checkpoint(ckpt_path):
-        """Infer eval_seed from nearest run metadata for the selected checkpoint."""
+    def _extract_float_key_from_metadata(meta_path, key_name):
+        if not meta_path or not os.path.isfile(meta_path):
+            return None
+        key_low = str(key_name).lower()
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    low = line.lower()
+                    if not low.startswith(key_low):
+                        continue
+                    if ':' in line:
+                        val = line.split(':', 1)[1].strip()
+                    elif '=' in line:
+                        val = line.split('=', 1)[1].strip()
+                    else:
+                        parts = line.split()
+                        val = parts[-1] if len(parts) > 1 else ''
+                    return _parse_float_or_none(val)
+        except Exception:
+            return None
+        return None
+
+    def _extract_eval_metadata_from_checkpoint(ckpt_path):
+        """Read eval metadata directly from checkpoint payload when available."""
         if not ckpt_path or not os.path.isfile(ckpt_path):
-            return None, None
+            return None
+        try:
+            import torch as torch_mod
+
+            data = torch_mod.load(ckpt_path, map_location='cpu', weights_only=False)
+            if not isinstance(data, dict):
+                return None
+            meta = data.get('metadata')
+            if not isinstance(meta, dict):
+                return None
+            out = {}
+            if 'eval_seed' in meta:
+                out['eval_seed'] = _parse_int_or_none(meta.get('eval_seed'))
+            if 'best_eval_single_seed' in meta:
+                out['best_eval_single_seed'] = _parse_int_or_none(meta.get('best_eval_single_seed'))
+            if 'best_eval_single_score' in meta:
+                out['best_eval_single_score'] = _parse_float_or_none(meta.get('best_eval_single_score'))
+            return out if out else None
+        except Exception:
+            return None
+
+    def _extract_eval_seed_from_metadata(meta_path):
+        return _extract_int_key_from_metadata(meta_path, 'eval_seed')
+
+    def _detect_eval_seed_from_checkpoint(ckpt_path):
+        """Infer eval_seed + best single eval seed from checkpoint or nearby metadata."""
+        if not ckpt_path or not os.path.isfile(ckpt_path):
+            return None, None, None, None
+
+        ckpt_meta = _extract_eval_metadata_from_checkpoint(ckpt_path)
+        if ckpt_meta:
+            eval_seed_val = _parse_int_or_none(ckpt_meta.get('eval_seed'))
+            single_seed_val = _parse_int_or_none(ckpt_meta.get('best_eval_single_seed'))
+            single_score_val = _parse_float_or_none(ckpt_meta.get('best_eval_single_score'))
+            if eval_seed_val is not None or single_seed_val is not None:
+                return eval_seed_val, single_seed_val, single_score_val, 'checkpoint metadata'
 
         candidate_dirs = [os.path.dirname(ckpt_path)]
         ws_root = os.path.dirname(os.path.abspath(__file__))
@@ -122,53 +200,89 @@ def run_cli(argv=None):
             for meta_name in ('info.txt', 'run_info.txt'):
                 meta_path = os.path.join(cand_dir, meta_name)
                 seed = _extract_eval_seed_from_metadata(meta_path)
-                if seed is not None:
-                    return seed, meta_path
-        return None, None
+                single_seed = _extract_int_key_from_metadata(meta_path, 'best_eval_single_seed')
+                single_score = _extract_float_key_from_metadata(meta_path, 'best_eval_single_score')
+                if seed is not None or single_seed is not None:
+                    return seed, single_seed, single_score, meta_path
+        return None, None, None, None
 
     g.current_level_name = None
     g.current_level_path = None
     g.current_checkpoint_path = None
     sess = _load_session_cfg()
     viz_seed = args.eval_seed if args.eval_seed is not None else _parse_int_or_none(sess.get('eval_seed'))
+    best_eval_single_seed = _parse_int_or_none(sess.get('best_eval_single_seed'))
     if sess.get('level_path') and os.path.isfile(sess['level_path']):
         g.current_level_path = sess['level_path']
         g.current_level_name = os.path.basename(sess['level_path'])
     if sess.get('checkpoint_path') and os.path.isfile(sess['checkpoint_path']):
         g.current_checkpoint_path = sess['checkpoint_path']
-        if viz_seed is None:
-            detected_seed, _ = _detect_eval_seed_from_checkpoint(g.current_checkpoint_path)
+        if viz_seed is None or best_eval_single_seed is None:
+            detected_seed, detected_single_seed, _, _ = _detect_eval_seed_from_checkpoint(g.current_checkpoint_path)
             if detected_seed is not None:
                 viz_seed = detected_seed
-                _save_session_cfg(eval_seed=viz_seed)
+            if detected_single_seed is not None:
+                best_eval_single_seed = detected_single_seed
+                if viz_seed is None:
+                    viz_seed = detected_single_seed
+            _save_session_cfg(eval_seed=viz_seed, best_eval_single_seed=best_eval_single_seed)
 
     def pick_file_dialog(
             filetypes,
             fallback_exts=('.pth',),
-            fallback_dirs=('.', 'logs'),
+            fallback_dirs=None,
             fallback_title='Select file - Esc to cancel'):
         """Pick a file via Tk dialog, with pygame fallback when Tk is unavailable."""
+        project_root = os.path.dirname(os.path.abspath(__file__))
+
+        if fallback_dirs is None:
+            fallback_dirs = (project_root,)
+        else:
+            normalized_dirs = []
+            for directory in fallback_dirs:
+                if os.path.isabs(directory):
+                    normalized_dirs.append(directory)
+                else:
+                    normalized_dirs.append(os.path.abspath(os.path.join(project_root, directory)))
+            if project_root not in normalized_dirs:
+                normalized_dirs.insert(0, project_root)
+            fallback_dirs = tuple(normalized_dirs)
+
+        start_dir = next((d for d in fallback_dirs if os.path.isdir(d)), project_root)
+
         try:
             import tkinter as tk
             from tkinter import filedialog
 
             root = tk.Tk()
             root.withdraw()
-            path = filedialog.askopenfilename(filetypes=filetypes)
+            path = filedialog.askopenfilename(filetypes=filetypes, initialdir=start_dir)
             root.destroy()
             return path
         except Exception:
-            def _pygame_file_picker(exts, search_dirs, title):
-                files = []
-                for directory in search_dirs:
-                    if os.path.isdir(directory):
-                        for root_dir, _, fns in os.walk(directory):
-                            for fn in fns:
-                                if any(fn.lower().endswith(e.lower()) for e in exts):
-                                    files.append(os.path.join(root_dir, fn))
-                files = sorted(set(files))
-                if not files:
-                    return ''
+            def _pygame_file_picker(exts, initial_dir, title):
+                ext_lows = [e.lower() for e in exts]
+
+                def _list_entries(directory):
+                    entries = []
+                    try:
+                        names = sorted(os.listdir(directory), key=lambda n: n.lower())
+                    except Exception:
+                        names = []
+
+                    parent = os.path.dirname(directory)
+                    if parent and parent != directory:
+                        entries.append(('up', '..', parent))
+
+                    for name in names:
+                        full = os.path.join(directory, name)
+                        if os.path.isdir(full):
+                            entries.append(('dir', name, full))
+                    for name in names:
+                        full = os.path.join(directory, name)
+                        if os.path.isfile(full) and any(name.lower().endswith(e) for e in ext_lows):
+                            entries.append(('file', name, full))
+                    return entries
 
                 screen = pygame.display.get_surface()
                 created_temp = False
@@ -180,29 +294,123 @@ def run_cli(argv=None):
                 font_small = pygame.font.SysFont(None, 20)
                 running = True
                 selected = ''
+                list_top = 50
+                row_h = 30
+                scroll = 0
+                current_dir = initial_dir
+                entries = _list_entries(current_dir)
+
+                def _max_visible_rows():
+                    return max(1, (screen.get_height() - list_top - 44) // row_h)
+
+                def _max_scroll():
+                    return max(0, len(entries) - _max_visible_rows())
+
+                def _clamp_scroll():
+                    nonlocal scroll
+                    scroll = max(0, min(scroll, _max_scroll()))
+
+                def _refresh_directory(new_dir):
+                    nonlocal current_dir, entries, scroll
+                    current_dir = new_dir
+                    entries = _list_entries(current_dir)
+                    scroll = 0
+
+                def _go_parent():
+                    parent = os.path.dirname(current_dir)
+                    if parent and parent != current_dir:
+                        _refresh_directory(parent)
+
                 while running:
                     for ev in pygame.event.get():
                         if ev.type == pygame.QUIT:
                             running = False
-                        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
-                            running = False
+                        if ev.type == pygame.KEYDOWN:
+                            if ev.key == pygame.K_ESCAPE:
+                                running = False
+                            elif ev.key == pygame.K_DOWN:
+                                scroll += 1
+                                _clamp_scroll()
+                            elif ev.key == pygame.K_UP:
+                                scroll -= 1
+                                _clamp_scroll()
+                            elif ev.key == pygame.K_PAGEDOWN:
+                                scroll += max(1, _max_visible_rows() - 1)
+                                _clamp_scroll()
+                            elif ev.key == pygame.K_PAGEUP:
+                                scroll -= max(1, _max_visible_rows() - 1)
+                                _clamp_scroll()
+                            elif ev.key == pygame.K_HOME:
+                                scroll = 0
+                            elif ev.key == pygame.K_END:
+                                scroll = _max_scroll()
+                            elif ev.key == pygame.K_BACKSPACE:
+                                _go_parent()
+                        if ev.type == pygame.MOUSEWHEEL:
+                            scroll -= int(ev.y)
+                            _clamp_scroll()
                         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                             mx, my = ev.pos
-                            for i, fp in enumerate(files):
-                                rect = pygame.Rect(20, 50 + i * 30, screen.get_width() - 40, 28)
-                                if rect.collidepoint(mx, my):
-                                    selected = fp
-                                    running = False
+                            visible_rows = _max_visible_rows()
+                            for i in range(visible_rows):
+                                idx = scroll + i
+                                if idx >= len(entries):
                                     break
+                                etype, _, target = entries[idx]
+                                rect = pygame.Rect(20, list_top + i * row_h, screen.get_width() - 52, 28)
+                                if rect.collidepoint(mx, my):
+                                    if etype in ('dir', 'up'):
+                                        _refresh_directory(target)
+                                    elif etype == 'file':
+                                        selected = target
+                                        running = False
+                                    break
+                        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (4, 5):
+                            scroll += -3 if ev.button == 4 else 3
+                            _clamp_scroll()
+
+                    _clamp_scroll()
                     screen.fill((30, 30, 30))
                     title_surface = font_small.render(title, True, (255, 255, 255))
                     screen.blit(title_surface, (20, 10))
-                    for i, fp in enumerate(files):
-                        y = 50 + i * 30
+
+                    path_surface = font_small.render(current_dir, True, (200, 200, 200))
+                    screen.blit(path_surface, (20, 28))
+
+                    hint_surface = font_small.render('Enter folder: click | Back: Backspace | Scroll: wheel/arrows/PgUp-PgDn', True, (185, 185, 185))
+                    screen.blit(hint_surface, (20, screen.get_height() - 18))
+
+                    visible_rows = _max_visible_rows()
+                    for i in range(visible_rows):
+                        idx = scroll + i
+                        if idx >= len(entries):
+                            break
+                        etype, name, _ = entries[idx]
+                        y = list_top + i * row_h
                         color = (200, 200, 200) if i % 2 == 0 else (170, 170, 170)
-                        pygame.draw.rect(screen, color, (18, y, screen.get_width() - 36, 28))
-                        name_surface = font_small.render(os.path.basename(fp), True, (0, 0, 0))
+                        pygame.draw.rect(screen, color, (18, y, screen.get_width() - 52, 28))
+                        if etype == 'up':
+                            label = '[..] Parent directory'
+                        elif etype == 'dir':
+                            label = f'[DIR] {name}'
+                        else:
+                            label = name
+                        name_surface = font_small.render(label, True, (0, 0, 0))
                         screen.blit(name_surface, (25, y + 6))
+
+                    if len(entries) > visible_rows:
+                        bar_x = screen.get_width() - 24
+                        bar_y = list_top
+                        bar_h = visible_rows * row_h
+                        pygame.draw.rect(screen, (80, 80, 80), (bar_x, bar_y, 8, bar_h))
+                        max_scroll = _max_scroll()
+                        thumb_h = max(20, int(bar_h * (visible_rows / float(len(entries)))))
+                        if max_scroll > 0:
+                            thumb_y = bar_y + int((bar_h - thumb_h) * (scroll / float(max_scroll)))
+                        else:
+                            thumb_y = bar_y
+                        pygame.draw.rect(screen, (180, 180, 180), (bar_x, thumb_y, 8, thumb_h))
+
                     pygame.display.flip()
                     pygame.time.wait(30)
 
@@ -210,16 +418,26 @@ def run_cli(argv=None):
                     pygame.display.quit()
                 return selected
 
-            return _pygame_file_picker(fallback_exts, fallback_dirs, fallback_title)
+            return _pygame_file_picker(fallback_exts, start_dir, fallback_title)
 
     def visualize_agent(
             env,
             max_episodes=10000,
             max_steps=MAX_EPISODE_MOVES,
             init_ckpt=None,
-            seed_base=None):
+            seed_base=None,
+            single_episode_only=False):
         """Run evaluation-only visualization loop for a loaded checkpoint."""
         import torch as torch_mod
+
+        if not env.render or env.display is None or env.font is None:
+            raise RuntimeError('Visualization requires render-enabled environment.')
+        env.display = cast(pygame.Surface, env.display)
+        env.font = cast(pygame.font.Font, env.font)
+        if env.small_font is None:
+            env.small_font = env.font
+        else:
+            env.small_font = cast(pygame.font.Font, env.small_font)
 
         try:
             import numpy as np
@@ -281,6 +499,9 @@ def run_cli(argv=None):
                 env.walls = walls
             except Exception:
                 pass
+        else:
+            # Avoid stale walls from previous level sessions when replaying checkpoints.
+            env.walls = set()
 
         max_cells = env.board_blocks * env.board_blocks
         n_walls = len(getattr(env, 'walls', set()))
@@ -297,16 +518,17 @@ def run_cli(argv=None):
 
         def choose_action_with_debug(cur_state):
             action_mask = env.get_safe_action_mask()
+            # Use the same action path as training eval to preserve RNG consumption
+            # and deterministic food placement sequence for seeded replays.
+            action = int(agent.act(cur_state, action_mask=action_mask))
             try:
                 with torch_mod.no_grad():
                     st = torch_mod.as_tensor(cur_state, dtype=torch_mod.float32).unsqueeze(0).to(device)
                     q_out = agent.policy_net(st).squeeze(0).cpu().tolist()
                 q_values = [float(v) for v in q_out]
-                masked_q = [q if action_mask[i] else -1e9 for i, q in enumerate(q_values)]
-                best = int(max(range(len(masked_q)), key=lambda i: masked_q[i]))
-                return best, q_values
+                return action, q_values
             except Exception:
-                return agent.act(cur_state, action_mask=action_mask), None
+                return action, None
 
         def _wait_for_resume(
                 env,
@@ -399,7 +621,10 @@ def run_cli(argv=None):
             ep += 1
 
             if seed_base is not None:
-                seed_val = int(seed_base) + ep
+                if single_episode_only:
+                    seed_val = int(seed_base)
+                else:
+                    seed_val = int(seed_base) + ep
                 random.seed(seed_val)
                 if np is not None:
                     np.random.seed(seed_val & 0xFFFFFFFF)
@@ -672,15 +897,32 @@ def run_cli(argv=None):
             )
             if path:
                 g.current_checkpoint_path = path
-                detected_seed, seed_source = _detect_eval_seed_from_checkpoint(path)
+                detected_seed, detected_single_seed, detected_single_score, seed_source = _detect_eval_seed_from_checkpoint(path)
                 if args.eval_seed is None and detected_seed is not None:
                     viz_seed = detected_seed
-                _save_session_cfg(checkpoint_path=path, eval_seed=viz_seed)
-                if detected_seed is not None:
-                    info_msg = (
-                        f'Checkpoint: {os.path.basename(path)} | '
-                        f'eval_seed={detected_seed} ({os.path.basename(seed_source)})'
-                    )
+                if detected_single_seed is not None:
+                    best_eval_single_seed = detected_single_seed
+                    viz_seed = detected_single_seed
+                else:
+                    best_eval_single_seed = None
+                _save_session_cfg(
+                    checkpoint_path=path,
+                    eval_seed=viz_seed,
+                    best_eval_single_seed=best_eval_single_seed,
+                )
+                if detected_seed is not None or detected_single_seed is not None:
+                    src_name = os.path.basename(seed_source) if isinstance(seed_source, str) and os.path.isfile(seed_source) else str(seed_source)
+                    if detected_single_seed is not None:
+                        score_txt = f'{detected_single_score:.2f}' if detected_single_score is not None else 'n/a'
+                        info_msg = (
+                            f'Checkpoint: {os.path.basename(path)} | '
+                            f'single_seed={detected_single_seed} score={score_txt} ({src_name})'
+                        )
+                    else:
+                        info_msg = (
+                            f'Checkpoint: {os.path.basename(path)} | '
+                            f'eval_seed={detected_seed} ({src_name})'
+                        )
                 else:
                     info_msg = f'Checkpoint: {os.path.basename(path)}'
             else:
@@ -720,9 +962,10 @@ def run_cli(argv=None):
 
             board_size_str = str(ckpt_board_size if ckpt_board_size else g.board_blocks)
             bs_cursor = len(board_size_str)
-            seed_str = '' if viz_seed is None else str(viz_seed)
+            default_seed = best_eval_single_seed if best_eval_single_seed is not None else viz_seed
+            seed_str = '' if default_seed is None else str(default_seed)
             seed_cursor = len(seed_str)
-            use_seed = bool(viz_seed is not None)
+            use_seed = bool(default_seed is not None)
             active_input = None
             blink_timer = 0
             submenu = True
@@ -771,15 +1014,25 @@ def run_cli(argv=None):
                                 viz_seed = chosen_seed
                             if chosen_seed is None and not use_seed:
                                 viz_seed = None
-                            _save_session_cfg(eval_seed=viz_seed)
+                            run_single_episode = (
+                                bool(use_seed)
+                                and chosen_seed is not None
+                                and best_eval_single_seed is not None
+                                and int(chosen_seed) == int(best_eval_single_seed)
+                            )
+                            _save_session_cfg(eval_seed=viz_seed, best_eval_single_seed=best_eval_single_seed)
                             try:
                                 visualize_agent(
                                     g,
+                                    max_episodes=(1 if run_single_episode else 10000),
                                     max_steps=MAX_EPISODE_MOVES,
                                     init_ckpt=g.current_checkpoint_path,
                                     seed_base=(chosen_seed if use_seed and chosen_seed is not None else None),
+                                    single_episode_only=run_single_episode,
                                 )
-                                if use_seed and chosen_seed is not None:
+                                if run_single_episode:
+                                    info_msg = f'Visualization finished (replayed best_eval_single seed={chosen_seed}).'
+                                elif use_seed and chosen_seed is not None:
                                     info_msg = f'Visualization finished (seed={chosen_seed}).'
                                 else:
                                     info_msg = 'Visualization finished (seed disabled).'
@@ -904,8 +1157,13 @@ def run_cli(argv=None):
                     if g.current_checkpoint_path
                     else 'No checkpoint loaded'
                 )
+                single_seed_status = (
+                    f'Best eval single seed: {best_eval_single_seed} (auto 1-episode replay)'
+                    if best_eval_single_seed is not None
+                    else 'Best eval single seed: n/a'
+                )
                 info_y = sy + 260
-                for line in [level_status, ckpt_status]:
+                for line in [level_status, ckpt_status, single_seed_status]:
                     clipped = g._fit_text(line, status_font, sub_w - 24)
                     surf = status_font.render(clipped, True, WHITE)
                     g.display.blit(surf, (sx + 12, info_y))

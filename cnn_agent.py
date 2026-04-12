@@ -259,8 +259,8 @@ class CNNAgent:
             tp.data.copy_(self.tau * pp.data + (1.0 - self.tau) * tp.data)
 
     # -- persistence -----------------------------------------------------
-    def save(self, path):
-        torch.save({
+    def save(self, path, metadata=None):
+        payload = {
             'policy_net': self.policy_net.state_dict(),
             'target_net': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -269,7 +269,10 @@ class CNNAgent:
             'steps': self.steps,
             'n_step': self.n_step,
             'board_size': self.board_size,
-        }, path)
+        }
+        if isinstance(metadata, dict) and metadata:
+            payload['metadata'] = metadata
+        torch.save(payload, path)
 
     def load(self, path, weights_only=False):
         data = torch.load(path, map_location=self.device, weights_only=False)

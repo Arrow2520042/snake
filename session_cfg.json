@@ -1,1 +1,1 @@
-{"checkpoint_path": "./logs/v14_1115k/20260331-215130/best_eval.pth", "eval_seed": 12345}
+{"checkpoint_path": "/home/arrow/snake/logs/v14_3000k/20260412-014011/best.pth", "eval_seed": 12345, "best_eval_single_seed": null}

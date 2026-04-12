@@ -271,6 +271,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
         scores = []
         step_counts = []
+        best_single_score = float('-inf')
+        best_single_steps = 0.0
+        best_single_seed = None
         try:
             for ep_idx in range(eval_episodes):
                 seed_val = eval_seed + eval_round_idx * 10007 + ep_idx
@@ -289,8 +292,14 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                     state, _, done, _ = eval_env.play_step(action, skip_events=True)
                     steps += 1
 
-                scores.append(float(eval_env.score))
-                step_counts.append(float(steps))
+                score_val = float(eval_env.score)
+                steps_val = float(steps)
+                scores.append(score_val)
+                step_counts.append(steps_val)
+                if score_val > best_single_score:
+                    best_single_score = score_val
+                    best_single_steps = steps_val
+                    best_single_seed = int(seed_val)
         finally:
             agent.eps = old_eps
             agent.steps = old_steps
@@ -305,7 +314,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
         avg_score = float(np.mean(scores)) if scores else 0.0
         avg_steps = float(np.mean(step_counts)) if step_counts else 0.0
-        return avg_score, avg_steps
+        if best_single_seed is None:
+            best_single_score = 0.0
+        return avg_score, avg_steps, best_single_score, best_single_steps, best_single_seed
 
     device_name = getattr(agent, 'device', 'cpu')
     python_executable = sys.executable
@@ -398,6 +409,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
     best_avg200 = 0.0
     best_ckpt_path = os.path.join(log_dir, 'best.pth')
     best_eval_avg = -1.0
+    best_eval_single_score = -1.0
+    best_eval_single_steps = 0.0
+    best_eval_single_seed = None
     best_eval_ckpt_path = os.path.join(log_dir, 'best_eval.pth')
     best_eval_root_path = os.path.abspath('best_eval.pth')
     eval_points = []
@@ -598,7 +612,7 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
                 # Deterministic policy check (eps=0 + action mask ON) for deployment-quality selection.
                 if eval_every > 0 and ep_counter % eval_every == 0:
                     eval_round_idx = ep_counter // eval_every
-                    eval_score, eval_steps = _run_deterministic_eval(eval_round_idx)
+                    eval_score, eval_steps, eval_single_score, eval_single_steps, eval_single_seed = _run_deterministic_eval(eval_round_idx)
                     eval_points.append(ep_counter)
                     eval_avg_scores.append(eval_score)
                     eval_avg_steps.append(eval_steps)
@@ -606,12 +620,27 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
 
                     if eval_score > best_eval_avg:
                         best_eval_avg = eval_score
-                        agent.save(best_eval_ckpt_path)
+                        best_eval_single_score = float(eval_single_score)
+                        best_eval_single_steps = float(eval_single_steps)
+                        best_eval_single_seed = int(eval_single_seed) if eval_single_seed is not None else None
+                        best_eval_metadata = {
+                            'eval_seed': int(eval_seed),
+                            'eval_round_idx': int(eval_round_idx),
+                            'best_eval_avg_score': float(best_eval_avg),
+                            'best_eval_single_score': float(best_eval_single_score),
+                            'best_eval_single_steps': float(best_eval_single_steps),
+                            'best_eval_single_seed': best_eval_single_seed,
+                            'saved_at_episode': int(ep_counter),
+                        }
+                        agent.save(best_eval_ckpt_path, metadata=best_eval_metadata)
                         try:
-                            agent.save(best_eval_root_path)
+                            agent.save(best_eval_root_path, metadata=best_eval_metadata)
                         except Exception:
                             pass
-                        eval_status = f'new best_eval -> {os.path.basename(best_eval_root_path)}'
+                        eval_status = (
+                            f'new best_eval -> {os.path.basename(best_eval_root_path)} '
+                            f'| single={best_eval_single_score:.2f} seed={best_eval_single_seed}'
+                        )
                     else:
                         eval_status = f'best_eval={best_eval_avg:.2f}'
 
@@ -710,6 +739,9 @@ def train(episodes=1000, max_steps=15000, save_every=200, level_path=None,
             ri.write(f'scheduler_source: {scheduler_source}\n')
             if eval_points:
                 ri.write(f'best_eval_avg_score: {best_eval_avg:.6f}\n')
+                ri.write(f'best_eval_single_score: {best_eval_single_score:.6f}\n')
+                ri.write(f'best_eval_single_steps: {best_eval_single_steps:.1f}\n')
+                ri.write(f'best_eval_single_seed: {best_eval_single_seed}\n')
                 ri.write(f'best_eval_path: {best_eval_ckpt_path}\n')
                 ri.write(f'best_eval_root_path: {best_eval_root_path}\n')
                 ri.write(f'eval_points: {len(eval_points)}\n')
