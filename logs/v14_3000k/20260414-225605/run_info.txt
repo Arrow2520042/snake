@@ -1,0 +1,16 @@
+best_score: 97
+best_avg200: 52.335000
+instant_eval_drop_ratio: 0.330000
+instant_eval_rollbacks: 0
+rollback_source: eval
+scheduler_source: eval
+best_eval_avg_score: 58.703125
+best_eval_single_score: 88.000000
+best_eval_single_steps: 2152.0
+best_eval_single_seed: 402651
+best_eval_path: logs/v14_3000k/20260414-225605/best_eval.pth
+best_eval_root_path: /home/arrow/snake/best_eval.pth
+eval_points: 43
+final_eps: 0.030313
+final_lr: 1.0e-05
+total_time: 49771.2s

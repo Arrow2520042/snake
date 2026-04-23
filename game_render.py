@@ -33,6 +33,21 @@ def update_ui(self):
     head_outer = (0, 160, 0)
     head_inner = (0, 220, 0)
 
+    def _lerp_color(c0, c1, t):
+        t = max(0.0, min(1.0, float(t)))
+        return (
+            int(c0[0] + (c1[0] - c0[0]) * t),
+            int(c0[1] + (c1[1] - c0[1]) * t),
+            int(c0[2] + (c1[2] - c0[2]) * t),
+        )
+
+    # Body gradient: near-head segments start bright cyan and darken toward tail.
+    body_outer_start = (120, 205, 255)
+    body_outer_end = (20, 70, 190)
+    body_inner_start = (170, 230, 255)
+    body_inner_end = (40, 95, 215)
+    segment_label_color = (255, 0, 170)
+
     # Cache font by block size so segment IDs remain readable across zoom levels.
     segment_font_size = max(12, int(bs * 0.55))
     if getattr(self, '_segment_label_font_size', None) != segment_font_size:
@@ -42,6 +57,7 @@ def update_ui(self):
     segment_font = getattr(self, '_segment_label_font', self.small_font or self.font)
     segment_ids = getattr(self, 'snake_segment_ids', None)
     use_stable_ids = isinstance(segment_ids, list) and len(segment_ids) == len(self.snake)
+    body_segments = max(1, len(self.snake) - 1)
 
     for i, cell in enumerate(self.snake):
         px = bx + cell[0] * bs
@@ -52,12 +68,18 @@ def update_ui(self):
             pygame.draw.rect(disp, head_outer, r_outer)
             pygame.draw.rect(disp, head_inner, r_inner)
         else:
-            pygame.draw.rect(disp, blue1, r_outer)
-            pygame.draw.rect(disp, blue2, r_inner)
+            grad_t = (i - 1) / float(max(1, body_segments - 1))
+            seg_outer = _lerp_color(body_outer_start, body_outer_end, grad_t)
+            seg_inner = _lerp_color(body_inner_start, body_inner_end, grad_t)
+            pygame.draw.rect(disp, seg_outer, r_outer)
+            pygame.draw.rect(disp, seg_inner, r_inner)
 
         if segment_font is not None:
-            seg_id = segment_ids[i] if use_stable_ids else (i + 1)
-            label = segment_font.render(str(seg_id), True, black if i == 0 else white)
+            if isinstance(segment_ids, list) and len(segment_ids) == len(self.snake):
+                seg_id = segment_ids[i]
+            else:
+                seg_id = i + 1
+            label = segment_font.render(str(seg_id), True, segment_label_color)
             label_rect = label.get_rect(center=(px + bs // 2, py + bs // 2))
             disp.blit(label, label_rect)
 
