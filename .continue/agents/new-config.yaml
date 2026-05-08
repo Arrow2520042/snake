@@ -1,0 +1,24 @@
+name: My Local Gemma
+version: 1.0.0
+schema: v1
+
+models:
+  - name: "Gemma 4 (31B)"
+    provider: ollama
+    model: "gemma4:31b"
+  - name: "Gemma 4 (26B)"
+    provider: ollama
+    model: "gemma4:26b"
+  - name: "Gemma 4 Latest"
+    provider: ollama
+    model: "gemma4:latest"
+
+# Ustawiamy najlżejszy model do podpowiedzi, żeby nie było błędów
+tabAutocompleteModel:
+  name: "Gemma Autocomplete"
+  provider: ollama
+  model: "gemma4:latest"
+
+embeddingsProvider:
+  provider: ollama
+  model: "gemma4:latest"
