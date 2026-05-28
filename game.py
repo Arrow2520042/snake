@@ -1,9 +1,3 @@
-"""Compatibility facade for the Snake MVC refactor.
-
-This module keeps the original import path stable (from game import SnakeGameAI)
-while delegating implementation to dedicated MVC modules.
-"""
-
 from game_model import (
     BLACK,
     BLUE1,

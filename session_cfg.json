@@ -1,1 +1,1 @@
-{"checkpoint_path": "/home/arrow/snake/best_eval.pth", "eval_seed": 22359, "best_eval_single_seed": 22359, "level_path": "/home/arrow/snake/levels/levelC.json"}
+{"checkpoint_path": "C:/VSC project files/snake/logs/levelCLogsTest/20260506-213150/best_eval.pth", "eval_seed": 32389, "best_eval_single_seed": 32389, "level_path": "C:/VSC project files/snake/levels/levelC.json"}
