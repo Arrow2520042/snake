@@ -1,8 +1,3 @@
-# Baza wiedzy (szczegoly do prezentacji)
-
-Ten plik rozwija kazdy punkt z prezentacji, w tej samej kolejnosci.
-Gdy pojawia sie wzor, ponizej znajduje sie wyjasnienie wszystkich symboli, w tym liter greckich.
-
 ## Architektura
 1) Rownolegle dziala wiele srodowisk, aby szybciej zbierac dane i zwiekszac roznorodnosc sytuacji uczacych.
 	Taki uklad poprawia stabilnosc, bo uczenie nie opiera sie na jednym epizodzie.
@@ -207,7 +202,7 @@ Wyjasnienie symboli:
 - $s'$ to nowy stan po wykonaniu akcji.
 - $arg\,max$ oznacza argument maksimum, czyli akcje o najwyzszej wartosci Q.
 
-Wyjasnienie celu $y$ (intuicja):
+Wyjasnienie celu $y$:
 - $y$ to "oczekiwana" wartosc, do ktorej dopasowujemy $Q(s,a)$.
 - Sklada sie z dwoch czesci: natychmiastowej nagrody $r$ oraz zdyskontowanej oceny tego, co najlepsze dalej.
 - Siec uczona wybiera najlepsza akcje w nowym stanie ($arg\,max$), a siec docelowa ocenia jej jakosc.
